@@ -9,7 +9,6 @@ use crate::plugins::plugin_map::{AtomicEvent, PluginEnv, PluginMap, RunningPlugi
 use crate::plugins::plugin_worker::MessageToWorker;
 use crate::plugins::watch_filesystem::watch_filesystem;
 use crate::plugins::zellij_exports::{wasi_read_string, wasi_write_object};
-use async_channel::Sender;
 use highway::{HighwayHash, PortableHash};
 use log::info;
 use notify_debouncer_full::{notify::RecommendedWatcher, Debouncer, FileIdMap};
@@ -19,12 +18,16 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex},
 };
+use tokio::{
+    sync::mpsc::Sender,
+    task::{self, JoinHandle},
+};
 use url::Url;
 use wasmi::{Engine, Module};
 use zellij_utils::consts::{ZELLIJ_CACHE_DIR, ZELLIJ_SESSION_CACHE_DIR, ZELLIJ_TMP_DIR};
 use zellij_utils::data::{
-    FloatingPaneCoordinates, InputMode, PaneContents, PaneRenderReport, PermissionStatus,
-    PermissionType, PipeMessage, PipeSource,
+    FloatingPaneCoordinates, InputMode, LayoutInfo, LayoutWithError, PaneContents,
+    PaneRenderReport, PermissionStatus, PermissionType, PipeMessage, PipeSource,
 };
 use zellij_utils::downloader::Downloader;
 use zellij_utils::input::keybinds::Keybinds;
@@ -44,11 +47,23 @@ use zellij_utils::{
     input::{
         command::TerminalAction,
         layout::{Layout, PluginUserConfiguration, RunPlugin, RunPluginLocation, RunPluginOrAlias},
-        plugins::PluginConfig,
+        plugins::{PluginAliases, PluginConfig},
     },
     ipc::ClientAttributes,
     pane_size::Size,
 };
+
+/// On Windows, colons in URL strings (e.g. `zellij:tab-bar`, `file:///...`)
+/// are illegal in path components. Replace them with underscores.
+#[cfg(windows)]
+fn make_plugin_url_path_safe(url: String) -> String {
+    url.replace(':', "_")
+}
+
+#[cfg(not(windows))]
+fn make_plugin_url_path_safe(url: String) -> String {
+    url
+}
 
 #[derive(Debug, Clone)]
 pub enum EventOrPipeMessage {
@@ -90,6 +105,7 @@ pub struct LoadingContext {
     pub plugin_config: PluginConfig,
     pub tab_index: Option<usize>,
     pub path_to_default_shell: PathBuf,
+    pub session_env_vars: std::collections::BTreeMap<String, String>,
     pub capabilities: PluginCapabilities,
     pub client_attributes: ClientAttributes,
     pub default_shell: Option<TerminalAction>,
@@ -111,10 +127,14 @@ impl LoadingContext {
         size: Size,
     ) -> Self {
         let plugin_own_data_dir = ZELLIJ_SESSION_CACHE_DIR
-            .join(Url::from(&plugin_config.location).to_string())
+            .join(make_plugin_url_path_safe(
+                Url::from(&plugin_config.location).to_string(),
+            ))
             .join(format!("{}-{}", plugin_id, client_id));
         let plugin_own_cache_dir = ZELLIJ_CACHE_DIR
-            .join(Url::from(&plugin_config.location).to_string())
+            .join(make_plugin_url_path_safe(
+                Url::from(&plugin_config.location).to_string(),
+            ))
             .join(format!("plugin_cache"));
         let default_mode = wasm_bridge
             .base_modes
@@ -131,6 +151,7 @@ impl LoadingContext {
             client_id,
             plugin_id,
             path_to_default_shell: wasm_bridge.path_to_default_shell.clone(),
+            session_env_vars: wasm_bridge.session_env_vars.clone(),
             plugin_cwd: cwd.unwrap_or_else(|| wasm_bridge.zellij_cwd.clone()),
             capabilities: wasm_bridge.capabilities.clone(),
             client_attributes: wasm_bridge.client_attributes.clone(),
@@ -172,6 +193,7 @@ pub struct WasmBridge {
     path_to_default_shell: PathBuf,
     watcher: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
     zellij_cwd: PathBuf,
+    session_env_vars: std::collections::BTreeMap<String, String>,
     capabilities: PluginCapabilities,
     client_attributes: ClientAttributes,
     default_shell: Option<TerminalAction>,
@@ -179,12 +201,15 @@ pub struct WasmBridge {
         HashMap<RunPluginLocation, HashMap<PluginUserConfiguration, Vec<(PluginId, ClientId)>>>,
     pending_pipes: PendingPipes,
     layout_dir: Option<PathBuf>,
+    available_layouts: Vec<LayoutInfo>,
+    available_layout_errors: Vec<LayoutWithError>,
     default_mode: InputMode,
     default_keybinds: Keybinds,
     keybinds: HashMap<ClientId, Keybinds>,
     base_modes: HashMap<ClientId, InputMode>,
     downloader: Downloader,
     previous_pane_render_report: Option<PaneRenderReport>,
+    pub last_session_save_time: Arc<Mutex<Option<u64>>>, // milliseconds since UNIX epoch
 }
 
 impl WasmBridge {
@@ -194,11 +219,14 @@ impl WasmBridge {
         plugin_dir: PathBuf,
         path_to_default_shell: PathBuf,
         zellij_cwd: PathBuf,
+        session_env_vars: std::collections::BTreeMap<String, String>,
         capabilities: PluginCapabilities,
         client_attributes: ClientAttributes,
         default_shell: Option<TerminalAction>,
         default_layout: Box<Layout>,
         layout_dir: Option<PathBuf>,
+        available_layouts: Vec<LayoutInfo>,
+        available_layout_errors: Vec<LayoutWithError>,
         default_mode: InputMode,
         default_keybinds: Keybinds,
     ) -> Self {
@@ -234,18 +262,22 @@ impl WasmBridge {
             loading_plugins: HashSet::new(),
             pending_plugin_reloads: HashSet::new(),
             zellij_cwd,
+            session_env_vars,
             capabilities,
             client_attributes,
             default_shell,
             cached_plugin_map: HashMap::new(),
             pending_pipes: Default::default(),
             layout_dir,
+            available_layouts,
+            available_layout_errors,
             default_mode,
             default_keybinds,
             keybinds: HashMap::new(),
             base_modes: HashMap::new(),
             downloader,
             previous_pane_render_report: None,
+            last_session_save_time: Arc::new(Mutex::new(None)),
         }
     }
     pub fn load_plugin(
@@ -482,6 +514,10 @@ impl WasmBridge {
                     .senders
                     .send_to_screen(ScreenInstruction::ClearKeyPressesIntercepts(client_id));
             }
+            // Clear any regex highlights this plugin registered across all panes
+            let _ = self
+                .senders
+                .send_to_screen(ScreenInstruction::ClearAllPluginHighlights(plugin_id));
 
             // Send worker exit messages
             for (_worker_name, worker_sender) in workers {
@@ -1324,6 +1360,7 @@ impl WasmBridge {
         keybinds: Option<Keybinds>,
         default_mode: Option<InputMode>,
         default_shell: Option<TerminalAction>,
+        layout_dir: Option<PathBuf>,
     ) -> Result<()> {
         let plugins_to_reconfigure: Vec<(PluginId, Arc<Mutex<RunningPlugin>>)> = self
             .plugin_map
@@ -1347,11 +1384,13 @@ impl WasmBridge {
             self.keybinds.insert(client_id, keybinds.clone());
         }
         self.default_shell = default_shell.clone();
+        self.layout_dir = layout_dir.clone();
         for (plugin_id, running_plugin) in plugins_to_reconfigure {
             self.plugin_executor.execute_for_plugin(plugin_id, {
                 let running_plugin = running_plugin.clone();
                 let keybinds = keybinds.clone();
                 let default_shell = default_shell.clone();
+                let layout_dir = layout_dir.clone();
                 move |_senders,
                       _plugin_map,
                       _connected_clients,
@@ -1366,6 +1405,7 @@ impl WasmBridge {
                         running_plugin.update_default_mode(default_mode);
                     }
                     running_plugin.update_default_shell(default_shell);
+                    running_plugin.update_layout_dir(layout_dir);
                 }
             });
         }
@@ -1637,7 +1677,7 @@ impl WasmBridge {
         match worker {
             Some(worker) => {
                 for (message, payload) in messages.drain(..) {
-                    if let Err(e) = worker.try_send(MessageToWorker::Message(message, payload)) {
+                    if let Err(e) = worker.send(MessageToWorker::Message(message, payload)) {
                         log::error!("Failed to send message to worker: {:?}", e);
                     }
                 }
@@ -1754,6 +1794,7 @@ impl WasmBridge {
                             drop(self.senders.send_to_screen(ScreenInstruction::AddPlugin(
                                 Some(should_float),
                                 should_be_open_in_place,
+                                false, // close_replaced_pane
                                 run_plugin_or_alias,
                                 pane_title,
                                 None,
@@ -1842,6 +1883,74 @@ impl WasmBridge {
             .next()
             .copied()
     }
+    pub fn update_available_layouts(
+        &mut self,
+        layouts: Vec<LayoutInfo>,
+        errors: Vec<LayoutWithError>,
+    ) {
+        // Diff with existing layouts
+        if self.available_layouts != layouts || self.available_layout_errors != errors {
+            // Update the stored layouts
+            self.available_layouts = layouts.clone();
+            self.available_layout_errors = errors.clone();
+
+            // Notify all plugins of the change
+            let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                None, // Broadcast to all plugins
+                None, // Broadcast to all clients
+                Event::AvailableLayoutInfo(layouts, errors),
+            )]));
+        }
+    }
+    pub fn state_update_for_plugin(&self, plugin_id: PluginId) {
+        let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+            Some(plugin_id),
+            None,
+            Event::AvailableLayoutInfo(
+                self.available_layouts.clone(),
+                self.available_layout_errors.clone(),
+            ),
+        )]));
+    }
+    pub fn detect_and_notify_plugin_config_changes(
+        &mut self,
+        new_plugins: &PluginAliases,
+        shutdown_send: Sender<()>,
+    ) -> Result<()> {
+        let err_context = || "failed to detect plugin config changes";
+
+        // Get all running plugins
+        let running_plugins = self.plugin_map.lock().unwrap().running_plugins();
+
+        for (plugin_id, client_id, running_plugin) in running_plugins {
+            let running_plugin = running_plugin.lock().unwrap();
+            let plugin_env = &running_plugin.store.data();
+            let current_config = &plugin_env.plugin.initial_userspace_configuration;
+            let plugin_location = &plugin_env.plugin.location;
+
+            // Look up this plugin in the new config by location
+            // Note: PluginAliases is HashMap<String, RunPlugin>, so we need to iterate
+            let new_config_for_location = new_plugins
+                .aliases
+                .values()
+                .find(|run_plugin| &run_plugin.location == plugin_location)
+                .map(|run_plugin| &run_plugin.configuration);
+
+            if let Some(new_config) = new_config_for_location {
+                // Compare configurations - only fire event if changed
+                if current_config != new_config {
+                    drop(running_plugin); // Release lock before sending
+
+                    let event = Event::PluginConfigurationChanged(new_config.inner().clone());
+                    let updates = vec![(Some(plugin_id), Some(client_id), event)];
+                    self.update_plugins(updates, shutdown_send.clone())
+                        .with_context(err_context)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn handle_plugin_successful_loading(
@@ -1852,6 +1961,7 @@ fn handle_plugin_successful_loading(
     let _ = senders.send_to_background_jobs(BackgroundJob::StopPluginLoadingAnimation(plugin_id));
     let _ = senders.send_to_screen(ScreenInstruction::RequestStateUpdateForPlugins);
     let _ = senders.send_to_background_jobs(BackgroundJob::ReportPluginList(plugin_list));
+    let _ = senders.send_to_plugin(PluginInstruction::RequestStateUpdateForPlugin(plugin_id));
 }
 
 fn handle_plugin_loading_failure(
@@ -1902,6 +2012,9 @@ fn check_event_permission(
         | Event::FailedToWriteConfigToDisk(..)
         | Event::CommandPaneReRun(..)
         | Event::CwdChanged(..)
+        | Event::AvailableLayoutInfo(..)
+        | Event::PluginConfigurationChanged(..)
+        | Event::HighlightClicked { .. }
         | Event::InputReceived => PermissionType::ReadApplicationState,
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
         Event::PaneRenderReport(..) => PermissionType::ReadPaneContents,

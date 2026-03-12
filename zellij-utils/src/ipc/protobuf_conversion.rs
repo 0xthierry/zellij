@@ -5,13 +5,15 @@ use crate::{
         ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg, ConfigFileUpdatedMsg,
         ConnStatusMsg, ConnectedMsg, DetachSessionMsg, ExitMsg, ExitReason as ProtoExitReason,
         FailedToStartWebServerMsg, FirstClientConnectedMsg, ForegroundColorMsg,
-        InputMode as ProtoInputMode, KeyMsg, KillSessionMsg, LogErrorMsg, LogMsg,
+        InputMode as ProtoInputMode, KeyMsg, KillSessionMsg, LayoutMetadata as ProtoLayoutMetadata,
+        LogErrorMsg, LogMsg, PaneMetadata as ProtoPaneMetadata, PaneRenderUpdateMsg,
         QueryTerminalSizeMsg, RenamedSessionMsg, RenderMsg,
-        ServerToClientMsg as ProtoServerToClientMsg, StartWebServerMsg, SwitchSessionMsg,
+        ServerToClientMsg as ProtoServerToClientMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
+        SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
         UnblockInputThreadMsg, WebServerStartedMsg,
     },
-    data::InputMode,
+    data::{InputMode, PaneId},
     errors::prelude::*,
     ipc::{
         ClientToServerMsg, ColorRegister, ExitReason, PaneReference, PixelDimensions,
@@ -113,6 +115,13 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                     error,
                 })
             },
+            ClientToServerMsg::SubscribeToPaneRenders {
+                pane_ids,
+                scrollback,
+            } => client_to_server_msg::Message::SubscribeToPaneRenders(SubscribeToPaneRendersMsg {
+                pane_ids: pane_ids.into_iter().map(|id| id.into()).collect(),
+                scrollback: scrollback.map(|s| s as u32),
+            }),
         };
 
         ProtoClientToServerMsg {
@@ -227,6 +236,14 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                     error: failed.error,
                 })
             },
+            Some(client_to_server_msg::Message::SubscribeToPaneRenders(msg)) => {
+                let pane_ids: Result<Vec<PaneId>> =
+                    msg.pane_ids.into_iter().map(|p| p.try_into()).collect();
+                Ok(ClientToServerMsg::SubscribeToPaneRenders {
+                    pane_ids: pane_ids?,
+                    scrollback: msg.scrollback.map(|s| s as usize),
+                })
+            },
             None => Err(anyhow!("Empty ClientToServerMsg message")),
         }
     }
@@ -288,6 +305,23 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
             },
             ServerToClientMsg::ConfigFileUpdated => {
                 server_to_client_msg::Message::ConfigFileUpdated(ConfigFileUpdatedMsg {})
+            },
+            ServerToClientMsg::PaneRenderUpdate {
+                pane_id,
+                viewport,
+                scrollback,
+                is_initial,
+            } => server_to_client_msg::Message::PaneRenderUpdate(PaneRenderUpdateMsg {
+                pane_id: Some(pane_id.into()),
+                viewport,
+                scrollback: scrollback.clone().unwrap_or_default(),
+                has_scrollback: scrollback.is_some(),
+                is_initial,
+            }),
+            ServerToClientMsg::SubscribedPaneClosed { pane_id } => {
+                server_to_client_msg::Message::SubscribedPaneClosed(SubscribedPaneClosedMsg {
+                    pane_id: Some(pane_id.into()),
+                })
             },
         };
 
@@ -370,6 +404,30 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
             },
             Some(server_to_client_msg::Message::ConfigFileUpdated(_)) => {
                 Ok(ServerToClientMsg::ConfigFileUpdated)
+            },
+            Some(server_to_client_msg::Message::PaneRenderUpdate(msg)) => {
+                let pane_id: PaneId = msg
+                    .pane_id
+                    .ok_or_else(|| anyhow!("Missing pane_id"))?
+                    .try_into()?;
+                let scrollback = if msg.has_scrollback {
+                    Some(msg.scrollback)
+                } else {
+                    None
+                };
+                Ok(ServerToClientMsg::PaneRenderUpdate {
+                    pane_id,
+                    viewport: msg.viewport,
+                    scrollback,
+                    is_initial: msg.is_initial,
+                })
+            },
+            Some(server_to_client_msg::Message::SubscribedPaneClosed(msg)) => {
+                let pane_id: PaneId = msg
+                    .pane_id
+                    .ok_or_else(|| anyhow!("Missing pane_id"))?
+                    .try_into()?;
+                Ok(ServerToClientMsg::SubscribedPaneClosed { pane_id })
             },
             None => Err(anyhow!("Empty ServerToClientMsg message")),
         }
@@ -578,6 +636,7 @@ impl From<crate::input::options::Options>
                 crate::input::options::Clipboard::Primary => ProtoClipboard::Primary as i32,
             }),
             copy_on_select: options.copy_on_select,
+            osc8_hyperlinks: options.osc8_hyperlinks,
             scrollback_editor: options
                 .scrollback_editor
                 .map(|p| p.to_string_lossy().to_string()),
@@ -601,6 +660,7 @@ impl From<crate::input::options::Options>
             show_startup_tips: options.show_startup_tips,
             show_release_notes: options.show_release_notes,
             advanced_mouse_actions: options.advanced_mouse_actions,
+            mouse_hover_effects: options.mouse_hover_effects,
             web_server_ip: options.web_server_ip.map(|ip| ip.to_string()),
             web_server_port: options.web_server_port.map(|p| p as u32),
             web_server_cert: options
@@ -611,6 +671,10 @@ impl From<crate::input::options::Options>
                 .map(|p| p.to_string_lossy().to_string()),
             enforce_https_for_localhost: options.enforce_https_for_localhost,
             post_command_discovery_hook: options.post_command_discovery_hook,
+            client_async_worker_tasks: options.client_async_worker_tasks.map(|v| v as u64),
+            visual_bell: options.visual_bell,
+            focus_follows_mouse: options.focus_follows_mouse,
+            mouse_click_through: options.mouse_click_through,
         }
     }
 }
@@ -663,6 +727,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
                 })
                 .transpose()?,
             copy_on_select: options.copy_on_select,
+            osc8_hyperlinks: options.osc8_hyperlinks,
             scrollback_editor: options.scrollback_editor.map(std::path::PathBuf::from),
             session_name: options.session_name,
             attach_to_session: options.attach_to_session,
@@ -690,6 +755,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
             show_startup_tips: options.show_startup_tips,
             show_release_notes: options.show_release_notes,
             advanced_mouse_actions: options.advanced_mouse_actions,
+            mouse_hover_effects: options.mouse_hover_effects,
             web_server_ip: options
                 .web_server_ip
                 .map(|ip| ip.parse())
@@ -700,6 +766,10 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
             web_server_key: options.web_server_key.map(std::path::PathBuf::from),
             enforce_https_for_localhost: options.enforce_https_for_localhost,
             post_command_discovery_hook: options.post_command_discovery_hook,
+            client_async_worker_tasks: options.client_async_worker_tasks.map(|v| v as usize),
+            visual_bell: options.visual_bell,
+            focus_follows_mouse: options.focus_follows_mouse,
+            mouse_click_through: options.mouse_click_through,
         })
     }
 }
@@ -712,30 +782,34 @@ impl From<crate::input::actions::Action>
         use crate::client_server_contract::client_server_contract::{
             action::ActionType, BreakPaneAction, BreakPaneLeftAction, BreakPaneRightAction,
             ChangeFloatingPaneCoordinatesAction, ClearScreenAction, CliPipeAction,
-            CloseFocusAction, ClosePluginPaneAction, CloseTabAction, CloseTerminalPaneAction,
-            ConfirmAction, CopyAction, DenyAction, DetachAction, DumpLayoutAction,
-            DumpScreenAction, EditFileAction, EditScrollbackAction, FocusNextPaneAction,
-            FocusPluginPaneWithIdAction, FocusPreviousPaneAction, FocusTerminalPaneWithIdAction,
-            GoToNextTabAction, GoToPreviousTabAction, GoToTabAction, GoToTabNameAction,
-            HalfPageScrollDownAction, HalfPageScrollUpAction, KeybindPipeAction,
-            LaunchOrFocusPluginAction, LaunchPluginAction, ListClientsAction, MouseEventAction,
-            MoveFocusAction, MoveFocusOrTabAction, MovePaneAction, MovePaneBackwardsAction,
-            MoveTabAction, NewBlockingPaneAction, NewFloatingPaneAction,
+            CloseFocusAction, ClosePluginPaneAction, CloseTabAction, CloseTabByIdAction,
+            CloseTerminalPaneAction, ConfirmAction, CopyAction, CurrentTabInfoAction, DenyAction,
+            DetachAction, DumpLayoutAction, DumpScreenAction, EditFileAction, EditScrollbackAction,
+            FocusNextPaneAction, FocusPluginPaneWithIdAction, FocusPreviousPaneAction,
+            FocusTerminalPaneWithIdAction, GoToNextTabAction, GoToPreviousTabAction, GoToTabAction,
+            GoToTabByIdAction, GoToTabNameAction, HalfPageScrollDownAction, HalfPageScrollUpAction,
+            HideFloatingPanesAction, KeybindPipeAction, LaunchOrFocusPluginAction,
+            LaunchPluginAction, ListClientsAction, ListPanesAction, ListTabsAction,
+            MouseEventAction, MoveFocusAction, MoveFocusOrTabAction, MovePaneAction,
+            MovePaneBackwardsAction, MoveTabAction, NewBlockingPaneAction, NewFloatingPaneAction,
             NewFloatingPluginPaneAction, NewInPlacePaneAction, NewInPlacePluginPaneAction,
             NewPaneAction, NewStackedPaneAction, NewTabAction, NewTiledPaneAction,
             NewTiledPluginPaneAction, NextSwapLayoutAction, NoOpAction, OverrideLayoutAction,
             PageScrollDownAction, PageScrollUpAction, PaneIdWithPlugin, PaneNameInputAction,
-            PreviousSwapLayoutAction, QueryTabNamesAction, QuitAction, RenamePluginPaneAction,
-            RenameSessionAction, RenameTabAction, RenameTerminalPaneAction, ResizeAction,
-            RunAction, ScrollDownAction, ScrollDownAtAction, ScrollToBottomAction,
-            ScrollToTopAction, ScrollUpAction, ScrollUpAtAction, SearchAction, SearchInputAction,
-            SearchToggleOptionAction, SkipConfirmAction, StackPanesAction,
-            StartOrReloadPluginAction, SwitchFocusAction, SwitchModeForAllClientsAction,
-            SwitchSessionAction, SwitchToModeAction, TabNameInputAction, ToggleActiveSyncTabAction,
-            ToggleFloatingPanesAction, ToggleFocusFullscreenAction, ToggleGroupMarkingAction,
-            ToggleMouseModeAction, TogglePaneEmbedOrFloatingAction, TogglePaneFramesAction,
+            PasteAction, PreviousSwapLayoutAction, QueryTabNamesAction, QuitAction,
+            RenamePluginPaneAction, RenameSessionAction, RenameTabAction, RenameTabByIdAction,
+            RenameTerminalPaneAction, ResizeAction, RunAction, SaveSessionAction, ScrollDownAction,
+            ScrollDownAtAction, ScrollToBottomAction, ScrollToTopAction, ScrollUpAction,
+            ScrollUpAtAction, SearchAction, SearchInputAction, SearchToggleOptionAction,
+            SetPaneBorderlessAction, SetPaneColorAction, ShowFloatingPanesAction,
+            SkipConfirmAction, StackPanesAction, StartOrReloadPluginAction, SwitchFocusAction,
+            SwitchModeForAllClientsAction, SwitchSessionAction, SwitchToModeAction,
+            TabNameInputAction, ToggleActiveSyncTabAction, ToggleFloatingPanesAction,
+            ToggleFocusFullscreenAction, ToggleGroupMarkingAction, ToggleMouseModeAction,
+            TogglePaneBorderlessAction, TogglePaneEmbedOrFloatingAction, TogglePaneFramesAction,
             TogglePaneInGroupAction, TogglePanePinnedAction, ToggleTabAction, UndoRenamePaneAction,
-            UndoRenameTabAction, WriteAction, WriteCharsAction,
+            UndoRenameTabAction, WriteAction, WriteCharsAction, WriteCharsToPaneIdAction,
+            WriteToPaneIdAction,
         };
         use std::collections::HashMap;
 
@@ -752,6 +826,24 @@ impl From<crate::input::actions::Action>
             }),
             crate::input::actions::Action::WriteChars { chars } => {
                 ActionType::WriteChars(WriteCharsAction { chars })
+            },
+            crate::input::actions::Action::WriteToPaneId { bytes, pane_id } => {
+                ActionType::WriteToPaneId(WriteToPaneIdAction {
+                    pane_id: Some(pane_id.into()),
+                    bytes: bytes.into_iter().map(|b| b as u32).collect(),
+                })
+            },
+            crate::input::actions::Action::WriteCharsToPaneId { chars, pane_id } => {
+                ActionType::WriteCharsToPaneId(WriteCharsToPaneIdAction {
+                    pane_id: Some(pane_id.into()),
+                    chars,
+                })
+            },
+            crate::input::actions::Action::Paste { chars, pane_id } => {
+                ActionType::Paste(PasteAction {
+                    chars,
+                    pane_id: pane_id.map(|p| p.into()),
+                })
             },
             crate::input::actions::Action::SwitchToMode { input_mode } => {
                 ActionType::SwitchToMode(SwitchToModeAction {
@@ -802,15 +894,24 @@ impl From<crate::input::actions::Action>
             crate::input::actions::Action::DumpScreen {
                 file_path,
                 include_scrollback,
-            } => ActionType::DumpScreen(DumpScreenAction {
-                file_path,
-                include_scrollback,
-            }),
+                pane_id,
+            } => {
+                let dump_to_stdout = file_path.is_none();
+                ActionType::DumpScreen(DumpScreenAction {
+                    file_path: file_path.unwrap_or_default(),
+                    include_scrollback,
+                    pane_id: pane_id.map(|p| p.into()),
+                    dump_to_stdout,
+                })
+            },
             crate::input::actions::Action::DumpLayout => {
                 ActionType::DumpLayout(DumpLayoutAction {})
             },
             crate::input::actions::Action::EditScrollback => {
                 ActionType::EditScrollback(EditScrollbackAction {})
+            },
+            crate::input::actions::Action::EditScrollbackRaw => {
+                ActionType::EditScrollback(EditScrollbackAction {}) // fallback to default edit scrollback
             },
             crate::input::actions::Action::ScrollUp => ActionType::ScrollUp(ScrollUpAction {}),
             crate::input::actions::Action::ScrollUpAt { position } => {
@@ -868,6 +969,7 @@ impl From<crate::input::actions::Action>
                 direction,
                 floating,
                 in_place,
+                close_replaced_pane,
                 start_suppressed,
                 coordinates,
                 near_current_pane,
@@ -876,6 +978,7 @@ impl From<crate::input::actions::Action>
                 direction: direction.map(|d| direction_to_proto_i32(d)),
                 floating,
                 in_place,
+                close_replaced_pane,
                 start_suppressed,
                 coordinates: coordinates.map(|c| c.into()),
                 near_current_pane,
@@ -896,24 +999,26 @@ impl From<crate::input::actions::Action>
                 command,
                 pane_name,
                 near_current_pane,
+                borderless,
             } => ActionType::NewTiledPane(NewTiledPaneAction {
                 direction: direction.map(|d| direction_to_proto_i32(d)),
                 command: command.map(|c| c.into()),
                 pane_name,
                 near_current_pane,
+                borderless,
             }),
             crate::input::actions::Action::NewInPlacePane {
                 command,
                 pane_name,
                 near_current_pane,
                 pane_id_to_replace,
-                close_replace_pane,
+                close_replaced_pane,
             } => ActionType::NewInPlacePane(NewInPlacePaneAction {
                 command: command.map(|c| c.into()),
                 pane_name,
                 near_current_pane,
                 pane_id_to_replace: pane_id_to_replace.and_then(|p| p.try_into().ok()),
-                close_replace_pane,
+                close_replaced_pane,
             }),
             crate::input::actions::Action::NewStackedPane {
                 command,
@@ -942,6 +1047,16 @@ impl From<crate::input::actions::Action>
             },
             crate::input::actions::Action::ToggleFloatingPanes => {
                 ActionType::ToggleFloatingPanes(ToggleFloatingPanesAction {})
+            },
+            crate::input::actions::Action::ShowFloatingPanes { tab_id } => {
+                ActionType::ShowFloatingPanes(ShowFloatingPanesAction {
+                    tab_id: tab_id.map(|id| id as u32),
+                })
+            },
+            crate::input::actions::Action::HideFloatingPanes { tab_id } => {
+                ActionType::HideFloatingPanes(HideFloatingPanesAction {
+                    tab_id: tab_id.map(|id| id as u32),
+                })
             },
             crate::input::actions::Action::CloseFocus => {
                 ActionType::CloseFocus(CloseFocusAction {})
@@ -1039,24 +1154,28 @@ impl From<crate::input::actions::Action>
                 should_float,
                 move_to_focused_tab,
                 should_open_in_place,
+                close_replaced_pane,
                 skip_cache,
             } => ActionType::LaunchOrFocusPlugin(LaunchOrFocusPluginAction {
                 plugin: Some(plugin.into()),
                 should_float,
                 move_to_focused_tab,
                 should_open_in_place,
+                close_replaced_pane,
                 skip_cache,
             }),
             crate::input::actions::Action::LaunchPlugin {
                 plugin,
                 should_float,
                 should_open_in_place,
+                close_replaced_pane,
                 skip_cache,
                 cwd,
             } => ActionType::LaunchPlugin(LaunchPluginAction {
                 plugin: Some(plugin.into()),
                 should_float,
                 should_open_in_place,
+                close_replaced_pane,
                 skip_cache,
                 cwd: cwd.map(|p| p.to_string_lossy().to_string()),
             }),
@@ -1098,25 +1217,15 @@ impl From<crate::input::actions::Action>
                 ActionType::NextSwapLayout(NextSwapLayoutAction {})
             },
             crate::input::actions::Action::OverrideLayout {
-                tiled_layout,
-                floating_layouts,
-                swap_tiled_layouts,
-                swap_floating_layouts,
-                tab_name,
+                tabs,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
+                apply_only_to_active_tab,
             } => ActionType::OverrideLayout(OverrideLayoutAction {
-                tiled_layout: tiled_layout.map(|l| l.into()),
-                floating_layouts: floating_layouts.into_iter().map(|l| l.into()).collect(),
-                swap_tiled_layouts: swap_tiled_layouts
-                    .map(|layouts| layouts.into_iter().map(|l| l.into()).collect())
-                    .unwrap_or_default(),
-                swap_floating_layouts: swap_floating_layouts
-                    .map(|layouts| layouts.into_iter().map(|l| l.into()).collect())
-                    .unwrap_or_default(),
-                tab_name,
+                tabs: tabs.into_iter().map(|t| t.into()).collect(),
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
+                apply_only_to_active_tab,
             }),
             crate::input::actions::Action::QueryTabNames => {
                 ActionType::QueryTabNames(QueryTabNamesAction {})
@@ -1149,10 +1258,12 @@ impl From<crate::input::actions::Action>
                 plugin,
                 pane_name,
                 skip_cache,
+                close_replaced_pane,
             } => ActionType::NewInPlacePluginPane(NewInPlacePluginPaneAction {
                 plugin: Some(plugin.into()),
                 pane_name,
                 skip_cache,
+                close_replaced_pane,
             }),
             crate::input::actions::Action::StartOrReloadPlugin { plugin } => {
                 ActionType::StartOrReloadPlugin(StartOrReloadPluginAction {
@@ -1200,6 +1311,15 @@ impl From<crate::input::actions::Action>
                     tab_index,
                     name: name.into_iter().map(|b| b as u32).collect(),
                 })
+            },
+            crate::input::actions::Action::GoToTabById { id } => {
+                ActionType::GoToTabById(GoToTabByIdAction { id })
+            },
+            crate::input::actions::Action::CloseTabById { id } => {
+                ActionType::CloseTabById(CloseTabByIdAction { id })
+            },
+            crate::input::actions::Action::RenameTabById { id, name } => {
+                ActionType::RenameTabById(RenameTabByIdAction { id, name })
             },
             crate::input::actions::Action::BreakPane => ActionType::BreakPane(BreakPaneAction {}),
             crate::input::actions::Action::BreakPaneRight => {
@@ -1276,6 +1396,21 @@ impl From<crate::input::actions::Action>
             crate::input::actions::Action::ListClients => {
                 ActionType::ListClients(ListClientsAction {})
             },
+            crate::input::actions::Action::ListPanes {
+                show_tab,
+                show_command,
+                show_state,
+                show_geometry,
+                show_all,
+                output_json,
+            } => ActionType::ListPanes(ListPanesAction {
+                show_tab,
+                show_command,
+                show_state,
+                show_geometry,
+                show_all,
+                output_json,
+            }),
             crate::input::actions::Action::TogglePanePinned => {
                 ActionType::TogglePanePinned(TogglePanePinnedAction {})
             },
@@ -1291,11 +1426,51 @@ impl From<crate::input::actions::Action>
                 pane_id: Some(pane_id.into()),
                 coordinates: Some(coordinates.into()),
             }),
+            crate::input::actions::Action::TogglePaneBorderless { pane_id } => {
+                ActionType::TogglePaneBorderless(TogglePaneBorderlessAction {
+                    pane_id: Some(pane_id.into()),
+                })
+            },
+            crate::input::actions::Action::SetPaneBorderless {
+                pane_id,
+                borderless,
+            } => ActionType::SetPaneBorderless(SetPaneBorderlessAction {
+                pane_id: Some(pane_id.into()),
+                borderless,
+            }),
             crate::input::actions::Action::TogglePaneInGroup => {
                 ActionType::TogglePaneInGroup(TogglePaneInGroupAction {})
             },
             crate::input::actions::Action::ToggleGroupMarking => {
                 ActionType::ToggleGroupMarking(ToggleGroupMarkingAction {})
+            },
+            crate::input::actions::Action::SaveSession => {
+                ActionType::SaveSession(SaveSessionAction {})
+            },
+            crate::input::actions::Action::ListTabs {
+                show_state,
+                show_dimensions,
+                show_panes,
+                show_layout,
+                show_all,
+                output_json,
+            } => ActionType::ListTabs(ListTabsAction {
+                show_state,
+                show_dimensions,
+                show_panes,
+                show_layout,
+                show_all,
+                output_json,
+            }),
+            crate::input::actions::Action::CurrentTabInfo { output_json } => {
+                ActionType::CurrentTabInfo(CurrentTabInfoAction { output_json })
+            },
+            crate::input::actions::Action::SetPaneColor { pane_id, fg, bg } => {
+                ActionType::SetPaneColor(SetPaneColorAction {
+                    pane_id: Some(pane_id.into()),
+                    fg,
+                    bg,
+                })
             },
         };
 
@@ -1333,6 +1508,32 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     chars: write_chars_action.chars,
                 })
             },
+            ActionType::WriteToPaneId(write_to_pane_id_action) => {
+                Ok(crate::input::actions::Action::WriteToPaneId {
+                    bytes: write_to_pane_id_action
+                        .bytes
+                        .into_iter()
+                        .map(|b| b as u8)
+                        .collect(),
+                    pane_id: write_to_pane_id_action
+                        .pane_id
+                        .ok_or_else(|| anyhow!("WriteToPaneId missing pane_id"))?
+                        .try_into()?,
+                })
+            },
+            ActionType::WriteCharsToPaneId(write_chars_to_pane_id_action) => {
+                Ok(crate::input::actions::Action::WriteCharsToPaneId {
+                    chars: write_chars_to_pane_id_action.chars,
+                    pane_id: write_chars_to_pane_id_action
+                        .pane_id
+                        .ok_or_else(|| anyhow!("WriteCharsToPaneId missing pane_id"))?
+                        .try_into()?,
+                })
+            },
+            ActionType::Paste(paste_action) => Ok(crate::input::actions::Action::Paste {
+                chars: paste_action.chars,
+                pane_id: paste_action.pane_id.map(|p| p.try_into()).transpose()?,
+            }),
             ActionType::SwitchToMode(switch_mode_action) => {
                 Ok(crate::input::actions::Action::SwitchToMode {
                     input_mode: proto_i32_to_input_mode(switch_mode_action.input_mode)?,
@@ -1376,12 +1577,19 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             },
             ActionType::ClearScreen(_) => Ok(crate::input::actions::Action::ClearScreen),
             ActionType::DumpScreen(dump_screen_action) => {
+                let file_path = if dump_screen_action.dump_to_stdout {
+                    None
+                } else {
+                    Some(dump_screen_action.file_path)
+                };
                 Ok(crate::input::actions::Action::DumpScreen {
-                    file_path: dump_screen_action.file_path,
+                    file_path,
                     include_scrollback: dump_screen_action.include_scrollback,
+                    pane_id: dump_screen_action.pane_id.and_then(|p| p.try_into().ok()),
                 })
             },
             ActionType::DumpLayout(_) => Ok(crate::input::actions::Action::DumpLayout),
+            ActionType::SaveSession(_) => Ok(crate::input::actions::Action::SaveSession),
             ActionType::EditScrollback(_) => Ok(crate::input::actions::Action::EditScrollback),
             ActionType::ScrollUp(_) => Ok(crate::input::actions::Action::ScrollUp),
             ActionType::ScrollUpAt(scroll_action) => {
@@ -1435,6 +1643,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     .transpose()?,
                 floating: edit_file_action.floating,
                 in_place: edit_file_action.in_place,
+                close_replaced_pane: edit_file_action.close_replaced_pane,
                 start_suppressed: edit_file_action.start_suppressed,
                 coordinates: edit_file_action
                     .coordinates
@@ -1465,6 +1674,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     command: new_tiled_action.command.map(|c| c.try_into()).transpose()?,
                     pane_name: new_tiled_action.pane_name,
                     near_current_pane: new_tiled_action.near_current_pane,
+                    borderless: new_tiled_action.borderless,
                 })
             },
             ActionType::NewInPlacePane(new_in_place_action) => {
@@ -1478,7 +1688,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     pane_id_to_replace: new_in_place_action
                         .pane_id_to_replace
                         .and_then(|p| p.try_into().ok()),
-                    close_replace_pane: new_in_place_action.close_replace_pane,
+                    close_replaced_pane: new_in_place_action.close_replaced_pane,
                 })
             },
             ActionType::NewStackedPane(new_stacked_action) => {
@@ -1514,6 +1724,16 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             },
             ActionType::ToggleFloatingPanes(_) => {
                 Ok(crate::input::actions::Action::ToggleFloatingPanes)
+            },
+            ActionType::ShowFloatingPanes(a) => {
+                Ok(crate::input::actions::Action::ShowFloatingPanes {
+                    tab_id: a.tab_id.map(|id| id as usize),
+                })
+            },
+            ActionType::HideFloatingPanes(a) => {
+                Ok(crate::input::actions::Action::HideFloatingPanes {
+                    tab_id: a.tab_id.map(|id| id as usize),
+                })
             },
             ActionType::CloseFocus(_) => Ok(crate::input::actions::Action::CloseFocus),
             ActionType::PaneNameInput(pane_name_action) => {
@@ -1633,6 +1853,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     should_float: launch_plugin_action.should_float,
                     move_to_focused_tab: launch_plugin_action.move_to_focused_tab,
                     should_open_in_place: launch_plugin_action.should_open_in_place,
+                    close_replaced_pane: launch_plugin_action.close_replaced_pane,
                     skip_cache: launch_plugin_action.skip_cache,
                 })
             },
@@ -1644,6 +1865,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .try_into()?,
                     should_float: launch_plugin_action.should_float,
                     should_open_in_place: launch_plugin_action.should_open_in_place,
+                    close_replaced_pane: launch_plugin_action.close_replaced_pane,
                     skip_cache: launch_plugin_action.skip_cache,
                     cwd: launch_plugin_action.cwd.map(PathBuf::from),
                 })
@@ -1695,45 +1917,16 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
             ActionType::NextSwapLayout(_) => Ok(crate::input::actions::Action::NextSwapLayout),
             ActionType::OverrideLayout(override_layout_action) => {
                 Ok(crate::input::actions::Action::OverrideLayout {
-                    tiled_layout: override_layout_action
-                        .tiled_layout
-                        .map(|l| l.try_into())
-                        .transpose()?,
-                    floating_layouts: override_layout_action
-                        .floating_layouts
+                    tabs: override_layout_action
+                        .tabs
                         .into_iter()
-                        .map(|l| l.try_into())
+                        .map(|t| t.try_into())
                         .collect::<Result<Vec<_>>>()?,
-                    swap_tiled_layouts: if override_layout_action.swap_tiled_layouts.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            override_layout_action
-                                .swap_tiled_layouts
-                                .into_iter()
-                                .map(|l| l.try_into())
-                                .collect::<Result<Vec<_>>>()?,
-                        )
-                    },
-                    swap_floating_layouts: if override_layout_action
-                        .swap_floating_layouts
-                        .is_empty()
-                    {
-                        None
-                    } else {
-                        Some(
-                            override_layout_action
-                                .swap_floating_layouts
-                                .into_iter()
-                                .map(|l| l.try_into())
-                                .collect::<Result<Vec<_>>>()?,
-                        )
-                    },
-                    tab_name: override_layout_action.tab_name,
                     retain_existing_terminal_panes: override_layout_action
                         .retain_existing_terminal_panes,
                     retain_existing_plugin_panes: override_layout_action
                         .retain_existing_plugin_panes,
+                    apply_only_to_active_tab: override_layout_action.apply_only_to_active_tab,
                 })
             },
             ActionType::QueryTabNames(_) => Ok(crate::input::actions::Action::QueryTabNames),
@@ -1771,6 +1964,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .try_into()?,
                     pane_name: new_in_place_plugin_action.pane_name,
                     skip_cache: new_in_place_plugin_action.skip_cache,
+                    close_replaced_pane: new_in_place_plugin_action.close_replaced_pane,
                 })
             },
             ActionType::StartOrReloadPlugin(start_plugin_action) => {
@@ -1835,6 +2029,22 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .collect(),
                 })
             },
+            ActionType::GoToTabById(go_to_tab_by_id_action) => {
+                Ok(crate::input::actions::Action::GoToTabById {
+                    id: go_to_tab_by_id_action.id,
+                })
+            },
+            ActionType::CloseTabById(close_tab_by_id_action) => {
+                Ok(crate::input::actions::Action::CloseTabById {
+                    id: close_tab_by_id_action.id,
+                })
+            },
+            ActionType::RenameTabById(rename_tab_by_id_action) => {
+                Ok(crate::input::actions::Action::RenameTabById {
+                    id: rename_tab_by_id_action.id,
+                    name: rename_tab_by_id_action.name,
+                })
+            },
             ActionType::BreakPane(_) => Ok(crate::input::actions::Action::BreakPane),
             ActionType::BreakPaneRight(_) => Ok(crate::input::actions::Action::BreakPaneRight),
             ActionType::BreakPaneLeft(_) => Ok(crate::input::actions::Action::BreakPaneLeft),
@@ -1890,6 +2100,29 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 })
             },
             ActionType::ListClients(_) => Ok(crate::input::actions::Action::ListClients),
+            ActionType::ListPanes(list_panes_action) => {
+                Ok(crate::input::actions::Action::ListPanes {
+                    show_tab: list_panes_action.show_tab,
+                    show_command: list_panes_action.show_command,
+                    show_state: list_panes_action.show_state,
+                    show_geometry: list_panes_action.show_geometry,
+                    show_all: list_panes_action.show_all,
+                    output_json: list_panes_action.output_json,
+                })
+            },
+            ActionType::ListTabs(list_tabs_action) => Ok(crate::input::actions::Action::ListTabs {
+                show_state: list_tabs_action.show_state,
+                show_dimensions: list_tabs_action.show_dimensions,
+                show_panes: list_tabs_action.show_panes,
+                show_layout: list_tabs_action.show_layout,
+                show_all: list_tabs_action.show_all,
+                output_json: list_tabs_action.output_json,
+            }),
+            ActionType::CurrentTabInfo(current_tab_info_action) => {
+                Ok(crate::input::actions::Action::CurrentTabInfo {
+                    output_json: current_tab_info_action.output_json,
+                })
+            },
             ActionType::TogglePanePinned(_) => Ok(crate::input::actions::Action::TogglePanePinned),
             ActionType::StackPanes(stack_panes_action) => {
                 Ok(crate::input::actions::Action::StackPanes {
@@ -1914,11 +2147,38 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                         .try_into()?,
                 },
             ),
+            ActionType::TogglePaneBorderless(toggle_borderless_action) => {
+                Ok(crate::input::actions::Action::TogglePaneBorderless {
+                    pane_id: toggle_borderless_action
+                        .pane_id
+                        .ok_or_else(|| anyhow!("TogglePaneBorderless missing pane_id"))?
+                        .try_into()?,
+                })
+            },
+            ActionType::SetPaneBorderless(set_borderless_action) => {
+                Ok(crate::input::actions::Action::SetPaneBorderless {
+                    pane_id: set_borderless_action
+                        .pane_id
+                        .ok_or_else(|| anyhow!("SetPaneBorderless missing pane_id"))?
+                        .try_into()?,
+                    borderless: set_borderless_action.borderless,
+                })
+            },
             ActionType::TogglePaneInGroup(_) => {
                 Ok(crate::input::actions::Action::TogglePaneInGroup)
             },
             ActionType::ToggleGroupMarking(_) => {
                 Ok(crate::input::actions::Action::ToggleGroupMarking)
+            },
+            ActionType::SetPaneColor(set_pane_color_action) => {
+                Ok(crate::input::actions::Action::SetPaneColor {
+                    pane_id: set_pane_color_action
+                        .pane_id
+                        .ok_or_else(|| anyhow!("SetPaneColor missing pane_id"))?
+                        .try_into()?,
+                    fg: set_pane_color_action.fg,
+                    bg: set_pane_color_action.bg,
+                })
             },
         }
     }
@@ -2031,14 +2291,19 @@ impl From<crate::data::LayoutInfo>
 {
     fn from(layout: crate::data::LayoutInfo) -> Self {
         use crate::client_server_contract::client_server_contract::layout_info::LayoutType;
-        let layout_type = match layout {
-            crate::data::LayoutInfo::BuiltIn(name) => LayoutType::BuiltinName(name),
-            crate::data::LayoutInfo::File(path) => LayoutType::FilePath(path),
-            crate::data::LayoutInfo::Url(url) => LayoutType::Url(url),
-            crate::data::LayoutInfo::Stringified(content) => LayoutType::Stringified(content),
+        let (layout_type, layout_metadata) = match layout {
+            crate::data::LayoutInfo::BuiltIn(name) => (LayoutType::BuiltinName(name), None),
+            crate::data::LayoutInfo::File(path, metadata) => {
+                (LayoutType::FilePath(path), Some(metadata.into()))
+            },
+            crate::data::LayoutInfo::Url(url) => (LayoutType::Url(url), None),
+            crate::data::LayoutInfo::Stringified(content) => {
+                (LayoutType::Stringified(content), None)
+            },
         };
         Self {
             layout_type: Some(layout_type),
+            layout_metadata,
         }
     }
 }
@@ -2053,13 +2318,91 @@ impl TryFrom<crate::client_server_contract::client_server_contract::LayoutInfo>
         use crate::client_server_contract::client_server_contract::layout_info::LayoutType;
         match layout.layout_type {
             Some(LayoutType::BuiltinName(name)) => Ok(crate::data::LayoutInfo::BuiltIn(name)),
-            Some(LayoutType::FilePath(path)) => Ok(crate::data::LayoutInfo::File(path)),
+            Some(LayoutType::FilePath(path)) => {
+                let layout_metadata = layout
+                    .layout_metadata
+                    .map(|m| m.try_into())
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok(crate::data::LayoutInfo::File(path, layout_metadata))
+            },
             Some(LayoutType::Url(url)) => Ok(crate::data::LayoutInfo::Url(url)),
             Some(LayoutType::Stringified(content)) => {
                 Ok(crate::data::LayoutInfo::Stringified(content))
             },
             None => Err(anyhow!("LayoutInfo missing layout_type")),
         }
+    }
+}
+
+impl From<crate::data::LayoutMetadata> for ProtoLayoutMetadata {
+    fn from(metadata: crate::data::LayoutMetadata) -> Self {
+        ProtoLayoutMetadata {
+            tabs: metadata.tabs.into_iter().map(|t| t.into()).collect(),
+            creation_time: metadata.creation_time,
+            update_time: metadata.update_time,
+        }
+    }
+}
+
+impl TryFrom<ProtoLayoutMetadata> for crate::data::LayoutMetadata {
+    type Error = anyhow::Error;
+    fn try_from(proto_metadata: ProtoLayoutMetadata) -> Result<Self> {
+        let tabs = proto_metadata
+            .tabs
+            .into_iter()
+            .map(|t| t.try_into())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(crate::data::LayoutMetadata {
+            tabs,
+            creation_time: proto_metadata.creation_time,
+            update_time: proto_metadata.update_time,
+        })
+    }
+}
+
+impl From<crate::data::TabMetadata> for ProtoTabMetadata {
+    fn from(metadata: crate::data::TabMetadata) -> Self {
+        ProtoTabMetadata {
+            pane_metadata: metadata.panes.into_iter().map(|p| p.into()).collect(),
+            name: metadata.name,
+        }
+    }
+}
+
+impl TryFrom<ProtoTabMetadata> for crate::data::TabMetadata {
+    type Error = anyhow::Error;
+    fn try_from(proto_metadata: ProtoTabMetadata) -> Result<Self> {
+        let panes = proto_metadata
+            .pane_metadata
+            .into_iter()
+            .map(|p| p.try_into())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(crate::data::TabMetadata {
+            panes,
+            name: proto_metadata.name,
+        })
+    }
+}
+
+impl From<crate::data::PaneMetadata> for ProtoPaneMetadata {
+    fn from(metadata: crate::data::PaneMetadata) -> Self {
+        ProtoPaneMetadata {
+            name: metadata.name,
+            is_plugin: metadata.is_plugin,
+            is_builtin_plugin: metadata.is_builtin_plugin,
+        }
+    }
+}
+
+impl TryFrom<ProtoPaneMetadata> for crate::data::PaneMetadata {
+    type Error = anyhow::Error;
+    fn try_from(proto_metadata: ProtoPaneMetadata) -> Result<Self> {
+        Ok(crate::data::PaneMetadata {
+            name: proto_metadata.name,
+            is_plugin: proto_metadata.is_plugin,
+            is_builtin_plugin: proto_metadata.is_builtin_plugin,
+        })
     }
 }
 
@@ -2072,6 +2415,7 @@ impl From<ExitReason> for ProtoExitReason {
             ExitReason::CannotAttach => ProtoExitReason::CannotAttach,
             ExitReason::Disconnect => ProtoExitReason::Disconnect,
             ExitReason::WebClientsForbidden => ProtoExitReason::WebClientsForbidden,
+            ExitReason::KickedByHost => ProtoExitReason::KickedByHost,
             ExitReason::Error(_msg) => ProtoExitReason::Error,
             ExitReason::CustomExitStatus(_status) => ProtoExitReason::CustomExitStatus,
         }
@@ -2088,6 +2432,7 @@ impl TryFrom<ProtoExitReason> for ExitReason {
             ProtoExitReason::CannotAttach => Ok(ExitReason::CannotAttach),
             ProtoExitReason::Disconnect => Ok(ExitReason::Disconnect),
             ProtoExitReason::WebClientsForbidden => Ok(ExitReason::WebClientsForbidden),
+            ProtoExitReason::KickedByHost => Ok(ExitReason::KickedByHost),
             ProtoExitReason::Error => Ok(ExitReason::Error("Protobuf error".to_string())),
             ProtoExitReason::CustomExitStatus => Ok(ExitReason::CustomExitStatus(0)),
             ProtoExitReason::Unspecified => Err(anyhow!("Unspecified exit reason")),
@@ -2398,6 +2743,43 @@ impl TryFrom<crate::client_server_contract::client_server_contract::FloatingCoor
     }
 }
 
+// FloatingCoordinate conversion - PercentOrFixed to FloatingCoordinate
+impl From<crate::input::layout::PercentOrFixed>
+    for crate::client_server_contract::client_server_contract::FloatingCoordinate
+{
+    fn from(size: crate::input::layout::PercentOrFixed) -> Self {
+        match size {
+            crate::input::layout::PercentOrFixed::Percent(p) => Self {
+                coordinate_type: Some(crate::client_server_contract::client_server_contract::floating_coordinate::CoordinateType::Percent(p as f32)),
+            },
+            crate::input::layout::PercentOrFixed::Fixed(f) => Self {
+                coordinate_type: Some(crate::client_server_contract::client_server_contract::floating_coordinate::CoordinateType::Fixed(f as u32)),
+            },
+        }
+    }
+}
+
+// Reverse FloatingCoordinate conversion for PercentOrFixed
+impl TryFrom<crate::client_server_contract::client_server_contract::FloatingCoordinate>
+    for crate::input::layout::PercentOrFixed
+{
+    type Error = anyhow::Error;
+    fn try_from(
+        coord: crate::client_server_contract::client_server_contract::FloatingCoordinate,
+    ) -> Result<Self> {
+        use crate::client_server_contract::client_server_contract::floating_coordinate::CoordinateType;
+        match coord
+            .coordinate_type
+            .ok_or_else(|| anyhow!("FloatingCoordinate missing coordinate_type"))?
+        {
+            CoordinateType::Percent(p) => {
+                Ok(crate::input::layout::PercentOrFixed::Percent(p as usize))
+            },
+            CoordinateType::Fixed(f) => Ok(crate::input::layout::PercentOrFixed::Fixed(f as usize)),
+        }
+    }
+}
+
 // FloatingPaneCoordinates conversion
 impl From<crate::data::FloatingPaneCoordinates>
     for crate::client_server_contract::client_server_contract::FloatingPaneCoordinates
@@ -2409,6 +2791,7 @@ impl From<crate::data::FloatingPaneCoordinates>
             width: coords.width.map(|w| w.into()),
             height: coords.height.map(|h| h.into()),
             pinned: coords.pinned,
+            borderless: coords.borderless,
         }
     }
 }
@@ -2427,6 +2810,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::FloatingPane
             width: coords.width.map(|w| w.try_into()).transpose()?,
             height: coords.height.map(|h| h.try_into()).transpose()?,
             pinned: coords.pinned,
+            borderless: coords.borderless,
         })
     }
 }
@@ -2437,26 +2821,58 @@ impl From<crate::data::NewPanePlacement>
 {
     fn from(placement: crate::data::NewPanePlacement) -> Self {
         use crate::client_server_contract::client_server_contract::new_pane_placement::PlacementType;
+        use crate::client_server_contract::client_server_contract::{
+            NoPreferencePlacement, StackedPlacement, TiledPlacement,
+        };
         let placement_type = match placement {
-            crate::data::NewPanePlacement::NoPreference => PlacementType::NoPreference(true),
-            crate::data::NewPanePlacement::Tiled(direction) => {
-                PlacementType::Tiled(direction.map(direction_to_proto_i32).unwrap_or(0))
+            crate::data::NewPanePlacement::NoPreference {
+                borderless: Some(b),
+            } => PlacementType::NoPreferenceWithOptions(NoPreferencePlacement {
+                borderless: Some(b),
+            }),
+            crate::data::NewPanePlacement::NoPreference { borderless: None } => {
+                PlacementType::NoPreference(true)
             },
+            crate::data::NewPanePlacement::Tiled {
+                direction,
+                borderless: Some(b),
+            } => PlacementType::TiledWithOptions(TiledPlacement {
+                direction: direction.map(direction_to_proto_i32),
+                borderless: Some(b),
+            }),
+            crate::data::NewPanePlacement::Tiled {
+                direction,
+                borderless: None,
+            } => PlacementType::Tiled(direction.map(direction_to_proto_i32).unwrap_or(0)),
             crate::data::NewPanePlacement::Floating(coords) => {
                 PlacementType::Floating(coords.map(|c| c.into()).unwrap_or_default())
             },
             crate::data::NewPanePlacement::InPlace {
                 pane_id_to_replace,
                 close_replaced_pane,
+                borderless,
             } => PlacementType::InPlace(
                 crate::client_server_contract::client_server_contract::NewPanePlacementInPlace {
                     pane_id_to_replace: pane_id_to_replace.map(|id| id.into()),
                     close_replaced_pane,
+                    borderless,
                 },
             ),
-            crate::data::NewPanePlacement::Stacked(pane_id) => {
-                PlacementType::Stacked(pane_id.map(|id| id.into()).unwrap_or_default())
-            },
+            crate::data::NewPanePlacement::Stacked {
+                pane_id_to_stack_under,
+                borderless: Some(b),
+            } => PlacementType::StackedWithOptions(StackedPlacement {
+                pane_id_to_stack_under: pane_id_to_stack_under.map(|id| id.into()),
+                borderless: Some(b),
+            }),
+            crate::data::NewPanePlacement::Stacked {
+                pane_id_to_stack_under,
+                borderless: None,
+            } => PlacementType::Stacked(
+                pane_id_to_stack_under
+                    .map(|id| id.into())
+                    .unwrap_or_default(),
+            ),
         };
         Self {
             placement_type: Some(placement_type),
@@ -2477,14 +2893,43 @@ impl TryFrom<crate::client_server_contract::client_server_contract::NewPanePlace
             .placement_type
             .ok_or_else(|| anyhow!("NewPanePlacement missing placement_type"))?
         {
-            PlacementType::NoPreference(_) => Ok(crate::data::NewPanePlacement::NoPreference),
+            // New fields (with borderless support) take priority
+            PlacementType::NoPreferenceWithOptions(opts) => {
+                Ok(crate::data::NewPanePlacement::NoPreference {
+                    borderless: opts.borderless,
+                })
+            },
+            PlacementType::TiledWithOptions(opts) => {
+                let direction = opts.direction.map(proto_i32_to_direction).transpose()?;
+                Ok(crate::data::NewPanePlacement::Tiled {
+                    direction,
+                    borderless: opts.borderless,
+                })
+            },
+            PlacementType::StackedWithOptions(opts) => {
+                let pane_id = opts
+                    .pane_id_to_stack_under
+                    .map(|id| id.try_into())
+                    .transpose()?;
+                Ok(crate::data::NewPanePlacement::Stacked {
+                    pane_id_to_stack_under: pane_id,
+                    borderless: opts.borderless,
+                })
+            },
+            // Legacy fields (without borderless support)
+            PlacementType::NoPreference(_) => {
+                Ok(crate::data::NewPanePlacement::NoPreference { borderless: None })
+            },
             PlacementType::Tiled(direction) => {
                 let direction = if direction == 0 {
                     None
                 } else {
                     Some(proto_i32_to_direction(direction)?)
                 };
-                Ok(crate::data::NewPanePlacement::Tiled(direction))
+                Ok(crate::data::NewPanePlacement::Tiled {
+                    direction,
+                    borderless: None,
+                })
             },
             PlacementType::Floating(coords) => {
                 let coords = if coords == Default::default() {
@@ -2500,6 +2945,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::NewPanePlace
                     .map(|id| id.try_into())
                     .transpose()?,
                 close_replaced_pane: in_place.close_replaced_pane,
+                borderless: in_place.borderless,
             }),
             PlacementType::Stacked(pane_id) => {
                 let pane_id = if pane_id == Default::default() {
@@ -2507,7 +2953,10 @@ impl TryFrom<crate::client_server_contract::client_server_contract::NewPanePlace
                 } else {
                     Some(pane_id.try_into()?)
                 };
-                Ok(crate::data::NewPanePlacement::Stacked(pane_id))
+                Ok(crate::data::NewPanePlacement::Stacked {
+                    pane_id_to_stack_under: pane_id,
+                    borderless: None,
+                })
             },
         }
     }
@@ -2686,6 +3135,82 @@ impl From<crate::input::layout::Run>
     }
 }
 
+// TabLayoutInfo conversion
+impl From<crate::input::layout::TabLayoutInfo>
+    for crate::client_server_contract::client_server_contract::TabLayoutInfo
+{
+    fn from(tab_info: crate::input::layout::TabLayoutInfo) -> Self {
+        Self {
+            tab_index: tab_info.tab_index as u32,
+            tab_name: tab_info.tab_name,
+            tiled_layout: Some(tab_info.tiled_layout.into()),
+            floating_layouts: tab_info
+                .floating_layouts
+                .into_iter()
+                .map(|l| l.into())
+                .collect(),
+            swap_tiled_layouts: tab_info
+                .swap_tiled_layouts
+                .unwrap_or_default()
+                .into_iter()
+                .map(|l| l.into())
+                .collect(),
+            swap_floating_layouts: tab_info
+                .swap_floating_layouts
+                .unwrap_or_default()
+                .into_iter()
+                .map(|l| l.into())
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<crate::client_server_contract::client_server_contract::TabLayoutInfo>
+    for crate::input::layout::TabLayoutInfo
+{
+    type Error = anyhow::Error;
+
+    fn try_from(
+        protobuf_tab: crate::client_server_contract::client_server_contract::TabLayoutInfo,
+    ) -> Result<Self> {
+        Ok(crate::input::layout::TabLayoutInfo {
+            tab_index: protobuf_tab.tab_index as usize,
+            tab_name: protobuf_tab.tab_name.filter(|s| !s.is_empty()),
+            tiled_layout: protobuf_tab
+                .tiled_layout
+                .ok_or_else(|| anyhow!("missing tiled_layout"))?
+                .try_into()?,
+            floating_layouts: protobuf_tab
+                .floating_layouts
+                .into_iter()
+                .map(|l| l.try_into())
+                .collect::<Result<Vec<_>>>()?,
+            swap_tiled_layouts: if protobuf_tab.swap_tiled_layouts.is_empty() {
+                None
+            } else {
+                Some(
+                    protobuf_tab
+                        .swap_tiled_layouts
+                        .into_iter()
+                        .map(|l| l.try_into())
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            },
+            swap_floating_layouts: if protobuf_tab.swap_floating_layouts.is_empty() {
+                None
+            } else {
+                Some(
+                    protobuf_tab
+                        .swap_floating_layouts
+                        .into_iter()
+                        .map(|l| l.try_into())
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            },
+        })
+    }
+}
+
 // TiledPaneLayout conversion
 impl From<crate::input::layout::TiledPaneLayout>
     for crate::client_server_contract::client_server_contract::TiledPaneLayout
@@ -2705,6 +3230,8 @@ impl From<crate::input::layout::TiledPaneLayout>
             is_expanded_in_stack: layout.is_expanded_in_stack,
             hide_floating_panes: layout.hide_floating_panes,
             pane_initial_contents: layout.pane_initial_contents,
+            default_fg: layout.default_fg,
+            default_bg: layout.default_bg,
         }
     }
 }
@@ -2725,6 +3252,9 @@ impl From<crate::input::layout::FloatingPaneLayout>
             already_running: layout.already_running,
             pane_initial_contents: layout.pane_initial_contents,
             logical_position: layout.logical_position.map(|l| l as u32),
+            borderless: layout.borderless,
+            default_fg: layout.default_fg,
+            default_bg: layout.default_bg,
         }
     }
 }
@@ -2893,12 +3423,20 @@ impl From<crate::data::CommandOrPlugin>
 {
     fn from(cmd_or_plugin: crate::data::CommandOrPlugin) -> Self {
         use crate::client_server_contract::client_server_contract::command_or_plugin::CommandOrPluginType;
+        use crate::client_server_contract::client_server_contract::CommandOrPluginFile;
         match cmd_or_plugin {
             crate::data::CommandOrPlugin::Command(cmd) => Self {
                 command_or_plugin_type: Some(CommandOrPluginType::Command(cmd.into())),
             },
             crate::data::CommandOrPlugin::Plugin(plugin) => Self {
                 command_or_plugin_type: Some(CommandOrPluginType::Plugin(plugin.into())),
+            },
+            crate::data::CommandOrPlugin::File(f) => Self {
+                command_or_plugin_type: Some(CommandOrPluginType::File(CommandOrPluginFile {
+                    path: f.path.display().to_string(),
+                    line_number: f.line_number.map(|n| n as i32),
+                    cwd: f.cwd.map(|c| c.display().to_string()),
+                })),
             },
         }
     }
@@ -2924,6 +3462,13 @@ impl TryFrom<crate::client_server_contract::client_server_contract::CommandOrPlu
             CommandOrPluginType::Plugin(plugin) => {
                 Ok(crate::data::CommandOrPlugin::Plugin(plugin.try_into()?))
             },
+            CommandOrPluginType::File(f) => Ok(crate::data::CommandOrPlugin::File(
+                crate::data::FileToOpen {
+                    path: std::path::PathBuf::from(&f.path),
+                    line_number: f.line_number.map(|n| n as usize),
+                    cwd: f.cwd.map(std::path::PathBuf::from),
+                },
+            )),
         }
     }
 }
@@ -3118,6 +3663,8 @@ impl TryFrom<crate::client_server_contract::client_server_contract::TiledPaneLay
             run_instructions_to_ignore: vec![], // not represented in protobuf
             hide_floating_panes: layout.hide_floating_panes,
             pane_initial_contents: layout.pane_initial_contents,
+            default_fg: layout.default_fg,
+            default_bg: layout.default_bg,
         })
     }
 }
@@ -3149,6 +3696,9 @@ impl TryFrom<crate::client_server_contract::client_server_contract::FloatingPane
             already_running: layout.already_running,
             pane_initial_contents: layout.pane_initial_contents,
             logical_position: layout.logical_position.map(|p| p as usize),
+            borderless: layout.borderless,
+            default_fg: layout.default_fg,
+            default_bg: layout.default_bg,
         })
     }
 }

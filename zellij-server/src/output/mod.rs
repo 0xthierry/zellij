@@ -16,7 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     str,
 };
-use zellij_utils::data::{PaneContents, PaneRenderReport};
+use zellij_utils::data::{HighlightLayer, PaneContents, PaneRenderReport};
 use zellij_utils::errors::prelude::*;
 use zellij_utils::pane_size::SizeInPixels;
 use zellij_utils::pane_size::{PaneGeom, Size};
@@ -40,25 +40,68 @@ fn vte_hide_cursor_instruction(vte_output: &mut String) -> Result<()> {
     write!(vte_output, "\u{1b}[?25l").context("failed to execute VTE instruction to hide cursor")
 }
 
+/// A selection region with associated styling for highlights and text selection.
+#[derive(Debug, Clone, Copy)]
+pub struct HighlightSelection {
+    pub selection: Selection,
+    pub bg: Option<AnsiCode>,
+    pub fg: Option<AnsiCode>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub layer: HighlightLayer,
+}
+
 fn adjust_styles_for_possible_selection(
-    chunk_selection_and_colors: Vec<(Selection, AnsiCode, Option<AnsiCode>)>,
+    chunk_selection_and_colors: &[HighlightSelection],
     character_styles: CharacterStyles,
     chunk_y: usize,
     chunk_width: usize,
 ) -> CharacterStyles {
     chunk_selection_and_colors
         .iter()
-        .find(|(selection, _background_color, _foreground_color)| {
-            selection.contains(chunk_y, chunk_width)
-        })
-        .map(|(_selection, background_color, foreground_color)| {
-            let mut character_styles = character_styles.background(Some(*background_color));
-            if let Some(foreground_color) = foreground_color {
-                character_styles = character_styles.foreground(Some(*foreground_color));
+        .find(|hs| hs.selection.contains(chunk_y, chunk_width))
+        .map(|hs| {
+            let mut styles = character_styles;
+            if let Some(bg) = hs.bg {
+                styles = styles.background(Some(bg));
             }
-            character_styles
+            if let Some(fg) = hs.fg {
+                styles = styles.foreground(Some(fg));
+            }
+            if hs.bold {
+                styles = styles.bold(Some(AnsiCode::On));
+            }
+            if hs.italic {
+                styles = styles.italic(Some(AnsiCode::On));
+            }
+            if hs.underline {
+                styles = styles.underline(Some(AnsiCode::Underline(None)));
+            }
+            styles
         })
         .unwrap_or(character_styles)
+}
+
+fn adjust_styles_for_custom_bg_fg(
+    character_styles: CharacterStyles,
+    pane_default_fg: Option<AnsiCode>,
+    pane_default_bg: Option<AnsiCode>,
+) -> CharacterStyles {
+    let mut character_styles = character_styles;
+    if character_styles.foreground.is_none() || character_styles.foreground == Some(AnsiCode::Reset)
+    {
+        if let Some(fg) = pane_default_fg {
+            character_styles.foreground = Some(fg);
+        }
+    }
+    if character_styles.background.is_none() || character_styles.background == Some(AnsiCode::Reset)
+    {
+        if let Some(bg) = pane_default_bg {
+            character_styles.background = Some(bg);
+        }
+    }
+    character_styles
 }
 
 fn write_changed_styles(
@@ -66,6 +109,7 @@ fn write_changed_styles(
     current_character_styles: CharacterStyles,
     chunk_changed_colors: Option<[Option<AnsiCode>; 256]>,
     link_handler: Option<&std::cell::Ref<LinkHandler>>,
+    osc8_hyperlinks: bool,
     vte_output: &mut String,
 ) -> Result<()> {
     let err_context = "failed to format changed styles to VTE string";
@@ -73,10 +117,14 @@ fn write_changed_styles(
     if let Some(new_styles) =
         character_styles.update_and_return_diff(&current_character_styles, chunk_changed_colors)
     {
-        if let Some(osc8_link) =
-            link_handler.and_then(|l_h| l_h.output_osc8(new_styles.link_anchor))
-        {
-            write!(vte_output, "{}{}", new_styles, osc8_link).context(err_context)?;
+        if osc8_hyperlinks {
+            if let Some(osc8_link) =
+                link_handler.and_then(|l_h| l_h.output_osc8(new_styles.link_anchor))
+            {
+                write!(vte_output, "{}{}", new_styles, osc8_link).context(err_context)?;
+            } else {
+                write!(vte_output, "{}", new_styles).context(err_context)?;
+            }
         } else {
             write!(vte_output, "{}", new_styles).context(err_context)?;
         }
@@ -89,6 +137,7 @@ fn serialize_chunks_with_newlines(
     _sixel_chunks: Option<&Vec<SixelImageChunk>>, // TODO: fix this sometime
     link_handler: Option<&mut Rc<RefCell<LinkHandler>>>,
     styled_underlines: bool,
+    osc8_hyperlinks: bool,
     max_size: Option<Size>,
 ) -> Result<String> {
     let err_context = || "failed to serialize input chunks".to_string();
@@ -107,6 +156,8 @@ fn serialize_chunks_with_newlines(
         }
 
         let chunk_changed_colors = character_chunk.changed_colors();
+        let pane_default_fg = character_chunk.pane_default_fg;
+        let pane_default_bg = character_chunk.pane_default_bg;
         let mut character_styles = DEFAULT_STYLES.enable_styled_underlines(styled_underlines);
         vte_output.push_str("\n\r");
         let mut chunk_width = character_chunk.x;
@@ -118,17 +169,22 @@ fn serialize_chunks_with_newlines(
                 }
             }
 
-            let current_character_styles = adjust_styles_for_possible_selection(
-                character_chunk.selection_and_colors(),
-                *t_character.styles,
-                character_chunk.y,
-                chunk_width,
+            let current_character_styles = adjust_styles_for_custom_bg_fg(
+                adjust_styles_for_possible_selection(
+                    character_chunk.selection_and_colors(),
+                    *t_character.styles,
+                    character_chunk.y,
+                    chunk_width,
+                ),
+                pane_default_fg,
+                pane_default_bg,
             );
             write_changed_styles(
                 &mut character_styles,
                 current_character_styles,
                 chunk_changed_colors,
                 link_handler.as_ref(),
+                osc8_hyperlinks,
                 &mut vte_output,
             )
             .with_context(err_context)?;
@@ -144,6 +200,7 @@ fn serialize_chunks(
     link_handler: Option<&mut Rc<RefCell<LinkHandler>>>,
     sixel_image_store: Option<&mut SixelImageStore>,
     styled_underlines: bool,
+    osc8_hyperlinks: bool,
     max_size: Option<Size>,
 ) -> Result<String> {
     let err_context = || "failed to serialize input chunks".to_string();
@@ -163,6 +220,8 @@ fn serialize_chunks(
         }
 
         let chunk_changed_colors = character_chunk.changed_colors();
+        let pane_default_fg = character_chunk.pane_default_fg;
+        let pane_default_bg = character_chunk.pane_default_bg;
         let mut character_styles = DEFAULT_STYLES.enable_styled_underlines(styled_underlines);
         vte_goto_instruction(character_chunk.x, character_chunk.y, &mut vte_output)
             .with_context(err_context)?;
@@ -175,17 +234,22 @@ fn serialize_chunks(
                 }
             }
 
-            let current_character_styles = adjust_styles_for_possible_selection(
-                character_chunk.selection_and_colors(),
-                *t_character.styles,
-                character_chunk.y,
-                chunk_width,
+            let current_character_styles = adjust_styles_for_custom_bg_fg(
+                adjust_styles_for_possible_selection(
+                    character_chunk.selection_and_colors(),
+                    *t_character.styles,
+                    character_chunk.y,
+                    chunk_width,
+                ),
+                pane_default_fg,
+                pane_default_bg,
             );
             write_changed_styles(
                 &mut character_styles,
                 current_character_styles,
                 chunk_changed_colors,
                 link_handler.as_ref(),
+                osc8_hyperlinks,
                 &mut vte_output,
             )
             .with_context(err_context)?;
@@ -297,6 +361,7 @@ pub struct Output {
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
     floating_panes_stack: Option<FloatingPanesStack>,
     styled_underlines: bool,
+    osc8_hyperlinks: bool,
     pane_render_report: PaneRenderReport,
     cursor_coordinates: Option<(usize, usize)>,
 }
@@ -306,11 +371,13 @@ impl Output {
         sixel_image_store: Rc<RefCell<SixelImageStore>>,
         character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
         styled_underlines: bool,
+        osc8_hyperlinks: bool,
     ) -> Self {
         Output {
             sixel_image_store,
             character_cell_size,
             styled_underlines,
+            osc8_hyperlinks,
             ..Default::default()
         }
     }
@@ -474,6 +541,7 @@ impl Output {
                     self.link_handler.as_mut(),
                     Some(&mut self.sixel_image_store.borrow_mut()),
                     self.styled_underlines,
+                    self.osc8_hyperlinks,
                     None, // No size constraints for regular rendering
                 )
                 .with_context(err_context)?,
@@ -541,6 +609,7 @@ impl Output {
                     self.link_handler.as_mut(),
                     Some(&mut self.sixel_image_store.borrow_mut()),
                     self.styled_underlines,
+                    self.osc8_hyperlinks,
                     max_size,
                 )
                 .with_context(err_context)?,
@@ -581,11 +650,16 @@ impl Output {
         self.client_character_chunks.values().any(|c| !c.is_empty())
             || self.sixel_chunks.values().any(|c| !c.is_empty())
     }
-    pub fn cursor_is_visible(&mut self, cursor_x: usize, cursor_y: usize) -> bool {
+    pub fn cursor_is_visible(
+        &mut self,
+        cursor_x: usize,
+        cursor_y: usize,
+        z_index: Option<usize>,
+    ) -> bool {
         self.cursor_coordinates = Some((cursor_x, cursor_y));
         self.floating_panes_stack
             .as_ref()
-            .map(|s| s.cursor_is_visible(cursor_x, cursor_y))
+            .map(|s| s.cursor_is_visible(cursor_x, cursor_y, z_index))
             .unwrap_or(true)
     }
     pub fn add_pane_contents(
@@ -698,7 +772,7 @@ impl FloatingPanesStack {
                 // pane covers chunk completely
                 drop(c_chunk.terminal_characters.drain(..));
                 return Ok(None);
-            } else if pane_right_edge > c_chunk_left_side
+            } else if pane_right_edge >= c_chunk_left_side
                 && pane_right_edge < c_chunk_right_side
                 && pane_left_edge <= c_chunk_left_side
             {
@@ -707,8 +781,8 @@ impl FloatingPanesStack {
                 drop(covered_part);
                 c_chunk.x = pane_right_edge + 1;
                 return Ok(None);
-            } else if pane_left_edge > c_chunk_left_side
-                && pane_left_edge < c_chunk_right_side
+            } else if pane_left_edge >= c_chunk_left_side
+                && pane_left_edge >= c_chunk_left_side
                 && pane_right_edge >= c_chunk_right_side
             {
                 // pane covers chunk partially to the right
@@ -726,6 +800,9 @@ impl FloatingPanesStack {
                 let right_chunk_x = pane_right_edge + 1;
                 let mut left_chunk =
                     CharacterChunk::new(left_chunk_characters, left_chunk_x, c_chunk.y);
+                left_chunk.pane_default_fg = c_chunk.pane_default_fg;
+                left_chunk.pane_default_bg = c_chunk.pane_default_bg;
+                left_chunk.changed_colors = c_chunk.changed_colors;
                 if !c_chunk.selection_and_colors.is_empty() {
                     left_chunk.selection_and_colors = c_chunk.selection_and_colors.clone();
                 }
@@ -896,8 +973,13 @@ impl FloatingPanesStack {
         }
         uncovered_chunks
     }
-    pub fn cursor_is_visible(&self, cursor_x: usize, cursor_y: usize) -> bool {
-        let z_index = 0; // TODO: receive z_index
+    pub fn cursor_is_visible(
+        &self,
+        cursor_x: usize,
+        cursor_y: usize,
+        z_index: Option<usize>,
+    ) -> bool {
+        let z_index = z_index.map(|z| z + 1).unwrap_or(0); // +1 because we only check panes above the active pane
         let panes_to_check = self.layers.iter().skip(z_index);
         for pane_geom in panes_to_check {
             let pane_top_edge = pane_geom.y;
@@ -922,7 +1004,9 @@ pub struct CharacterChunk {
     pub x: usize,
     pub y: usize,
     pub changed_colors: Option<[Option<AnsiCode>; 256]>,
-    selection_and_colors: Vec<(Selection, AnsiCode, Option<AnsiCode>)>, // Selection, background color, optional foreground color
+    pub pane_default_fg: Option<AnsiCode>,
+    pub pane_default_bg: Option<AnsiCode>,
+    selection_and_colors: Vec<HighlightSelection>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -947,24 +1031,24 @@ impl CharacterChunk {
     }
     pub fn add_selection_and_colors(
         &mut self,
-        selection: Selection,
-        background_color: AnsiCode,
-        foreground_color: Option<AnsiCode>,
+        highlight: HighlightSelection,
         offset_x: usize,
         offset_y: usize,
     ) {
-        self.selection_and_colors.push((
-            selection.offset(offset_x, offset_y),
-            background_color,
-            foreground_color,
-        ));
+        self.selection_and_colors.push(HighlightSelection {
+            selection: highlight.selection.offset(offset_x, offset_y),
+            ..highlight
+        });
     }
-    pub fn selection_and_colors(&self) -> Vec<(Selection, AnsiCode, Option<AnsiCode>)> {
-        // Selection, background color, optional foreground color
-        self.selection_and_colors.clone()
+    pub fn selection_and_colors(&self) -> &[HighlightSelection] {
+        &self.selection_and_colors
     }
     pub fn add_changed_colors(&mut self, changed_colors: Option<[Option<AnsiCode>; 256]>) {
         self.changed_colors = changed_colors;
+    }
+    pub fn add_pane_defaults(&mut self, fg: Option<AnsiCode>, bg: Option<AnsiCode>) {
+        self.pane_default_fg = fg;
+        self.pane_default_bg = bg;
     }
     pub fn changed_colors(&self) -> Option<[Option<AnsiCode>; 256]> {
         self.changed_colors
@@ -1083,7 +1167,12 @@ impl OutputBuffer {
         self.changed_lines.clear();
         self.should_update_all_lines = false;
     }
-    pub fn serialize(&self, viewport: &[Row], max_size: Option<Size>) -> Result<String> {
+    pub fn serialize(
+        &self,
+        viewport: &[Row],
+        osc8_hyperlinks: bool,
+        max_size: Option<Size>,
+    ) -> Result<String> {
         let mut chunks = Vec::new();
         for (line_index, line) in viewport.iter().enumerate() {
             let terminal_characters =
@@ -1093,7 +1182,14 @@ impl OutputBuffer {
             let y = line_index;
             chunks.push(CharacterChunk::new(terminal_characters, x, y));
         }
-        serialize_chunks_with_newlines(chunks, None, None, self.styled_underlines, max_size)
+        serialize_chunks_with_newlines(
+            chunks,
+            None,
+            None,
+            self.styled_underlines,
+            osc8_hyperlinks,
+            max_size,
+        )
     }
     pub fn changed_chunks_in_viewport(
         &self,

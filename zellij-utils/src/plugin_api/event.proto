@@ -62,6 +62,9 @@ enum EventType {
     UserAction = 37;
     ActionComplete = 38;
     CwdChanged = 39;
+    AvailableLayoutInfo = 40;
+    PluginConfigurationChanged = 41;
+    HighlightClicked = 42;
 }
 
 message EventNameList {
@@ -103,6 +106,9 @@ message Event {
     UserActionPayload user_action_payload = 31;
     ActionCompletePayload action_complete_payload = 32;
     CwdChangedPayload cwd_changed_payload = 33;
+    AvailableLayoutInfoPayload available_layout_info_payload = 34;
+    PluginConfigurationChangedPayload plugin_configuration_changed_payload = 35;
+    HighlightClickedPayload highlight_clicked_payload = 36;
   }
 }
 
@@ -202,6 +208,11 @@ message SessionUpdatePayload {
   repeated ResurrectableSession resurrectable_sessions = 2;
 }
 
+message AvailableLayoutInfoPayload {
+  repeated LayoutInfo available_layouts = 1;
+  repeated LayoutWithError layouts_with_errors = 2;
+}
+
 message RunCommandResultPayload {
   optional int32 exit_code = 1;
   bytes stdout = 2;
@@ -297,6 +308,7 @@ message SessionManifest {
   uint32 web_client_count = 9;
   repeated ClientTabHistory tab_history = 10;
   repeated ClientPaneHistory pane_history = 11;
+  uint64 creation_time = 12;
 }
 
 message ClientTabHistory {
@@ -318,6 +330,54 @@ message PluginInfo {
 message LayoutInfo {
   string name = 1;
   string source = 2;
+  optional LayoutMetadata layout_metadata = 5;
+}
+
+message LayoutWithError {
+  string layout_name = 1;
+  LayoutParsingError error = 2;
+}
+
+message LayoutParsingError {
+  oneof error_type {
+    KdlErrorVariant kdl_error = 1;
+    SyntaxError syntax_error = 2;
+  }
+}
+
+message KdlErrorVariant {
+  KdlError kdl_error = 1;
+  string file_name = 2;
+  string source_code = 3;
+}
+
+message SyntaxError {
+  // Empty message, just a marker
+}
+
+message KdlError {
+  string error_message = 1;
+  optional uint64 offset = 2;
+  optional uint64 len = 3;
+  optional string help_message = 4;
+}
+
+message LayoutMetadata {
+  repeated TabMetadata tabs = 1;
+  string creation_time = 2;
+  string update_time = 3;
+
+}
+
+message TabMetadata {
+  repeated PaneMetadata pane_metadata = 1;
+  optional string name = 2;
+}
+
+message PaneMetadata {
+  optional string name = 1;
+  bool is_plugin = 2;
+  bool is_builtin_plugin = 3;
 }
 
 message ResurrectableSession {
@@ -349,6 +409,8 @@ message PaneInfo {
     optional string plugin_url = 21;
     bool is_selectable = 22;
     repeated IndexInPaneGroup index_in_pane_group = 23;
+    optional string default_fg = 24;
+    optional string default_bg = 25;
 }
 
 message IndexInPaneGroup {
@@ -373,6 +435,9 @@ message TabInfo {
     uint32 display_area_columns = 14;
     uint32 selectable_tiled_panes_count = 15;
     uint32 selectable_floating_panes_count = 16;
+    uint32 tab_id = 17;
+    bool has_bell_notification = 18;
+    bool is_flashing_bell = 19;
 }
 
 message ModeUpdatePayload {
@@ -449,3 +514,15 @@ message ActionCompletePayload {
   optional PaneId pane_id = 2;
   repeated ContextItem context = 3;
 }
+
+message PluginConfigurationChangedPayload {
+  repeated ContextItem configuration = 1;
+}
+
+message HighlightClickedPayload {
+  PaneId pane_id = 1;
+  string pattern = 2;
+  string matched_string = 3;
+  repeated ContextItem context = 4;
+}
+

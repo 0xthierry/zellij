@@ -1,23 +1,19 @@
+use crate::os_input_output::AsyncReader;
 use crate::panes::sixel::SixelImageStore;
 use crate::panes::{FloatingPanes, TiledPanes};
 use crate::panes::{LinkHandler, PaneId};
 use crate::plugins::PluginInstruction;
 use crate::pty::PtyInstruction;
 use crate::tab::layout_applier::LayoutApplier;
-use crate::{
-    os_input_output::{AsyncReader, Pid, ServerOsApi},
-    thread_bus::ThreadSenders,
-    ClientId,
-};
+use crate::{os_input_output::ServerOsApi, thread_bus::ThreadSenders, ClientId};
 use insta::assert_snapshot;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use interprocess::local_socket::LocalSocketStream;
+use interprocess::local_socket::Stream as LocalSocketStream;
 use zellij_utils::{
     channels::{self, ChannelWithContext, Receiver, SenderWithContext},
     data::{ModeInfo, Palette, Style},
@@ -49,15 +45,7 @@ impl ServerOsApi for FakeInputOutput {
         _file_to_open: TerminalAction,
         _quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
         _default_editor: Option<PathBuf>,
-    ) -> Result<(u32, RawFd, RawFd)> {
-        unimplemented!()
-    }
-
-    fn read_from_tty_stdout(&self, _fd: RawFd, _buf: &mut [u8]) -> Result<usize> {
-        unimplemented!()
-    }
-
-    fn async_file_reader(&self, _fd: RawFd) -> Box<dyn AsyncReader> {
+    ) -> Result<(u32, Box<dyn AsyncReader>, Option<u32>)> {
         unimplemented!()
     }
 
@@ -69,11 +57,11 @@ impl ServerOsApi for FakeInputOutput {
         unimplemented!()
     }
 
-    fn kill(&self, _pid: Pid) -> Result<()> {
+    fn kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()
     }
 
-    fn force_kill(&self, _pid: Pid) -> Result<()> {
+    fn force_kill(&self, _pid: u32) -> Result<()> {
         unimplemented!()
     }
 
@@ -92,6 +80,14 @@ impl ServerOsApi for FakeInputOutput {
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
         unimplemented!()
     }
+    fn new_client_with_reply(
+        &mut self,
+        _client_id: ClientId,
+        _stream: LocalSocketStream,
+        _reply_stream: LocalSocketStream,
+    ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
+        unimplemented!()
+    }
 
     fn remove_client(&mut self, _client_id: ClientId) -> Result<()> {
         unimplemented!()
@@ -101,7 +97,7 @@ impl ServerOsApi for FakeInputOutput {
         unimplemented!()
     }
 
-    fn get_cwd(&self, _pid: Pid) -> Option<PathBuf> {
+    fn get_cwd(&self, _pid: u32) -> Option<PathBuf> {
         unimplemented!()
     }
 
@@ -114,7 +110,7 @@ impl ServerOsApi for FakeInputOutput {
         _terminal_id: u32,
         _run_command: RunCommand,
         _quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
-    ) -> Result<(RawFd, RawFd)> {
+    ) -> Result<(Box<dyn AsyncReader>, Option<u32>)> {
         unimplemented!()
     }
 
@@ -122,7 +118,7 @@ impl ServerOsApi for FakeInputOutput {
         unimplemented!()
     }
 
-    fn send_sigint(&self, _pid: Pid) -> Result<()> {
+    fn send_sigint(&self, _pid: u32) -> Result<()> {
         unimplemented!()
     }
 }
@@ -154,6 +150,7 @@ fn create_layout_applier_fixtures(
     bool,
     Option<PaneId>,
     Box<dyn ServerOsApi>,
+    bool,
     bool,
     bool,
     bool,
@@ -228,6 +225,7 @@ fn create_layout_applier_fixtures(
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
 
     (
@@ -249,6 +247,7 @@ fn create_layout_applier_fixtures(
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     )
 }
@@ -273,6 +272,7 @@ fn create_layout_applier_fixtures_with_receivers(
     bool,
     Option<PaneId>,
     Box<dyn ServerOsApi>,
+    bool,
     bool,
     bool,
     bool,
@@ -355,6 +355,7 @@ fn create_layout_applier_fixtures_with_receivers(
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let osc8_hyperlinks = true;
     let explicitly_disable_kitty_keyboard_protocol = false;
 
     (
@@ -376,6 +377,7 @@ fn create_layout_applier_fixtures_with_receivers(
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         mock_pty_receiver,
         mock_plugin_receiver,
@@ -577,6 +579,7 @@ fn test_apply_empty_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -599,6 +602,7 @@ fn test_apply_empty_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None, // blocking_terminal
     );
@@ -660,6 +664,7 @@ fn test_apply_simple_two_pane_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -682,6 +687,7 @@ fn test_apply_simple_two_pane_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -744,6 +750,7 @@ fn test_apply_three_pane_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -766,6 +773,7 @@ fn test_apply_three_pane_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -827,6 +835,7 @@ fn test_apply_horizontal_split_with_sizes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -849,6 +858,7 @@ fn test_apply_horizontal_split_with_sizes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -910,6 +920,7 @@ fn test_apply_vertical_split_with_sizes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -932,6 +943,7 @@ fn test_apply_vertical_split_with_sizes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -996,6 +1008,7 @@ fn test_apply_nested_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1018,6 +1031,7 @@ fn test_apply_nested_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1078,6 +1092,7 @@ fn test_apply_layout_with_focus() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1100,6 +1115,7 @@ fn test_apply_layout_with_focus() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1163,6 +1179,7 @@ fn test_apply_layout_with_commands() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1185,6 +1202,7 @@ fn test_apply_layout_with_commands() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1245,6 +1263,7 @@ fn test_apply_layout_with_named_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1267,6 +1286,7 @@ fn test_apply_layout_with_named_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1327,6 +1347,7 @@ fn test_apply_layout_with_borderless_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1349,6 +1370,7 @@ fn test_apply_layout_with_borderless_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1418,6 +1440,7 @@ fn test_apply_layout_with_floating_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1440,6 +1463,7 @@ fn test_apply_layout_with_floating_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1510,6 +1534,7 @@ fn test_apply_layout_with_floating_pane_with_command() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1532,6 +1557,7 @@ fn test_apply_layout_with_floating_pane_with_command() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1616,6 +1642,7 @@ fn test_apply_layout_with_mixed_tiled_and_floating_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1638,6 +1665,7 @@ fn test_apply_layout_with_mixed_tiled_and_floating_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1705,6 +1733,7 @@ fn test_reapply_layout_exact_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1727,6 +1756,7 @@ fn test_reapply_layout_exact_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1806,6 +1836,7 @@ fn test_reapply_layout_logical_position_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1828,6 +1859,7 @@ fn test_reapply_layout_logical_position_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -1908,6 +1940,7 @@ fn test_reapply_layout_with_more_positions() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -1930,6 +1963,7 @@ fn test_reapply_layout_with_more_positions() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2015,6 +2049,7 @@ fn test_reapply_floating_pane_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2037,6 +2072,7 @@ fn test_reapply_floating_pane_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2126,6 +2162,7 @@ fn test_apply_complex_nested_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2148,6 +2185,7 @@ fn test_apply_complex_nested_layout() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2213,6 +2251,7 @@ fn test_apply_layout_with_stacked_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2235,6 +2274,7 @@ fn test_apply_layout_with_stacked_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2306,6 +2346,7 @@ fn test_apply_layout_with_multiple_stacks() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2328,6 +2369,7 @@ fn test_apply_layout_with_multiple_stacks() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2406,6 +2448,7 @@ fn test_apply_layout_with_plugin_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2428,6 +2471,7 @@ fn test_apply_layout_with_plugin_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2512,6 +2556,7 @@ fn test_apply_layout_with_mixed_plugin_and_terminal_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2534,6 +2579,7 @@ fn test_apply_layout_with_mixed_plugin_and_terminal_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2601,6 +2647,7 @@ fn test_apply_layout_with_missing_plugin_ids() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2623,6 +2670,7 @@ fn test_apply_layout_with_missing_plugin_ids() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2676,6 +2724,7 @@ fn test_apply_layout_with_excess_terminal_ids() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -2698,6 +2747,7 @@ fn test_apply_layout_with_excess_terminal_ids() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2771,6 +2821,7 @@ fn test_override_layout_basic_with_both_tiled_and_floating() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -2795,6 +2846,7 @@ fn test_override_layout_basic_with_both_tiled_and_floating() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -2913,6 +2965,7 @@ fn test_override_layout_hide_floating_panes_true() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -2937,6 +2990,7 @@ fn test_override_layout_hide_floating_panes_true() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3043,6 +3097,7 @@ fn test_override_layout_show_floating_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -3067,6 +3122,7 @@ fn test_override_layout_show_floating_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3179,6 +3235,7 @@ fn test_override_tiled_exact_match_preservation_commands() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -3203,6 +3260,7 @@ fn test_override_tiled_exact_match_preservation_commands() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3304,6 +3362,7 @@ fn test_override_tiled_exact_match_preservation_plugins() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -3328,6 +3387,7 @@ fn test_override_tiled_exact_match_preservation_plugins() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3427,6 +3487,7 @@ fn test_override_tiled_all_panes_closed_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -3451,6 +3512,7 @@ fn test_override_tiled_all_panes_closed_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3555,6 +3617,7 @@ fn test_override_tiled_mixed_some_matches_some_new() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -3579,6 +3642,7 @@ fn test_override_tiled_mixed_some_matches_some_new() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3674,6 +3738,7 @@ fn test_override_tiled_new_panes_for_unmatched_positions() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -3696,6 +3761,7 @@ fn test_override_tiled_new_panes_for_unmatched_positions() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3783,6 +3849,7 @@ fn test_override_tiled_focus_on_new_pane() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -3805,6 +3872,7 @@ fn test_override_tiled_focus_on_new_pane() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -3892,6 +3960,7 @@ fn test_override_tiled_focus_when_focused_pane_closed() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -3916,6 +3985,7 @@ fn test_override_tiled_focus_when_focused_pane_closed() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4016,6 +4086,7 @@ fn test_override_tiled_empty_layout_closes_all() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -4040,6 +4111,7 @@ fn test_override_tiled_empty_layout_closes_all() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4153,6 +4225,7 @@ fn test_override_floating_exact_match_preservation() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -4177,6 +4250,7 @@ fn test_override_floating_exact_match_preservation() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4294,6 +4368,7 @@ fn test_override_floating_all_closed_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -4318,6 +4393,7 @@ fn test_override_floating_all_closed_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4437,6 +4513,7 @@ fn test_override_floating_new_panes_created() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -4459,6 +4536,7 @@ fn test_override_floating_new_panes_created() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4579,6 +4657,7 @@ fn test_override_floating_focus_handling() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -4603,6 +4682,7 @@ fn test_override_floating_focus_handling() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4712,6 +4792,7 @@ fn test_override_floating_position_and_size_update() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -4734,6 +4815,7 @@ fn test_override_floating_position_and_size_update() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4823,6 +4905,7 @@ fn test_override_floating_return_value_has_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
     ) = create_layout_applier_fixtures(size);
 
@@ -4845,6 +4928,7 @@ fn test_override_floating_return_value_has_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -4944,6 +5028,7 @@ fn test_override_floating_return_value_no_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -4968,6 +5053,7 @@ fn test_override_floating_return_value_no_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -5083,6 +5169,7 @@ fn test_override_full_tiled_and_floating_together() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -5107,6 +5194,7 @@ fn test_override_full_tiled_and_floating_together() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -5227,6 +5315,7 @@ fn test_override_viewport_adjustment_with_borderless() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -5251,6 +5340,7 @@ fn test_override_viewport_adjustment_with_borderless() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -5349,6 +5439,7 @@ fn test_override_tiled_retain_terminal_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -5373,6 +5464,7 @@ fn test_override_tiled_retain_terminal_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -5480,6 +5572,7 @@ fn test_override_tiled_retain_terminal_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -5504,6 +5597,7 @@ fn test_override_tiled_retain_terminal_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -5626,6 +5720,7 @@ fn test_override_floating_retain_terminal_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -5650,6 +5745,7 @@ fn test_override_floating_retain_terminal_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -5782,6 +5878,7 @@ fn test_override_floating_retain_terminal_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -5806,6 +5903,7 @@ fn test_override_floating_retain_terminal_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -5944,6 +6042,7 @@ fn test_override_mixed_retain_terminal_panes_both_tiled_and_floating() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -5968,6 +6067,7 @@ fn test_override_mixed_retain_terminal_panes_both_tiled_and_floating() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -6103,6 +6203,7 @@ fn test_override_retain_terminal_but_close_plugin_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -6127,6 +6228,7 @@ fn test_override_retain_terminal_but_close_plugin_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -6259,6 +6361,7 @@ fn test_override_tiled_retain_plugin_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -6283,6 +6386,7 @@ fn test_override_tiled_retain_plugin_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -6396,6 +6500,7 @@ fn test_override_tiled_retain_plugin_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -6420,6 +6525,7 @@ fn test_override_tiled_retain_plugin_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -6548,6 +6654,7 @@ fn test_override_floating_retain_plugin_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -6572,6 +6679,7 @@ fn test_override_floating_retain_plugin_panes_partial_match() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -6695,6 +6803,7 @@ fn test_override_floating_retain_plugin_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -6719,6 +6828,7 @@ fn test_override_floating_retain_plugin_panes_no_matches() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -6850,6 +6960,7 @@ fn test_override_mixed_retain_plugin_panes_both_tiled_and_floating() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -6874,6 +6985,7 @@ fn test_override_mixed_retain_plugin_panes_both_tiled_and_floating() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );
@@ -7005,6 +7117,7 @@ fn test_override_retain_plugin_but_close_terminal_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         pty_receiver,
         plugin_receiver,
@@ -7029,6 +7142,7 @@ fn test_override_retain_plugin_but_close_terminal_panes() {
         debug,
         arrow_fonts,
         styled_underlines,
+        osc8_hyperlinks,
         explicitly_disable_kitty_keyboard_protocol,
         None,
     );

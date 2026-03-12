@@ -1,15 +1,16 @@
 mod kdl_layout_parser;
 use crate::data::{
     BareKey, Direction, FloatingPaneCoordinates, InputMode, KeyWithModifier, LayoutInfo,
-    MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo, PaneManifest, PermissionType,
-    Resize, SessionInfo, StyleDeclaration, Styling, TabInfo, WebSharing, DEFAULT_STYLES,
+    LayoutMetadata, MultiplayerColors, Palette, PaletteColor, PaneId, PaneInfo, PaneManifest,
+    PermissionType, Resize, SessionInfo, StyleDeclaration, Styling, TabInfo, WebSharing,
+    DEFAULT_STYLES,
 };
 use crate::envs::EnvironmentVariables;
 use crate::home::{find_default_config_dir, get_layout_dir};
 use crate::input::config::{Config, ConfigError, KdlError};
 use crate::input::keybinds::Keybinds;
 use crate::input::layout::{
-    Layout, PluginUserConfiguration, RunPlugin, RunPluginOrAlias, SplitSize,
+    Layout, PercentOrFixed, PluginUserConfiguration, RunPlugin, RunPluginOrAlias, TabLayoutInfo,
 };
 use crate::input::options::{Clipboard, OnForceClose, Options};
 use crate::input::permission::{GrantedPermission, PermissionCache};
@@ -28,6 +29,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use crate::input::actions::{Action, SearchDirection, SearchOption};
 use crate::input::command::RunCommandAction;
@@ -48,6 +50,7 @@ macro_rules! parse_kdl_action_arguments {
                 "FocusPreviousPane" => Ok(Action::FocusPreviousPane),
                 "SwitchFocus" => Ok(Action::SwitchFocus),
                 "EditScrollback" => Ok(Action::EditScrollback),
+                "EditScrollbackRaw" => Ok(Action::EditScrollbackRaw),
                 "ScrollUp" => Ok(Action::ScrollUp),
                 "ScrollDown" => Ok(Action::ScrollDown),
                 "ScrollToBottom" => Ok(Action::ScrollToBottom),
@@ -61,6 +64,8 @@ macro_rules! parse_kdl_action_arguments {
                 "ToggleActiveSyncTab" => Ok(Action::ToggleActiveSyncTab),
                 "TogglePaneEmbedOrFloating" => Ok(Action::TogglePaneEmbedOrFloating),
                 "ToggleFloatingPanes" => Ok(Action::ToggleFloatingPanes),
+                "ShowFloatingPanes" => Ok(Action::ShowFloatingPanes { tab_id: None }),
+                "HideFloatingPanes" => Ok(Action::HideFloatingPanes { tab_id: None }),
                 "CloseFocus" => Ok(Action::CloseFocus),
                 "UndoRenamePane" => Ok(Action::UndoRenamePane),
                 "NoOp" => Ok(Action::NoOp),
@@ -536,8 +541,9 @@ impl Action {
             },
             "MovePaneBackwards" => Ok(Action::MovePaneBackwards),
             "DumpScreen" => Ok(Action::DumpScreen {
-                file_path: string,
+                file_path: Some(string),
                 include_scrollback: false,
+                pane_id: None,
             }),
             "DumpLayout" => Ok(Action::DumpLayout),
             "NewPane" => {
@@ -687,15 +693,20 @@ impl Action {
             },
             Action::MovePaneBackwards => Some(KdlNode::new("MovePaneBackwards")),
             Action::DumpScreen {
-                file_path: file,
+                file_path: Some(file),
                 include_scrollback: _,
+                pane_id: _,
             } => {
                 let mut node = KdlNode::new("DumpScreen");
                 node.push(file.clone());
                 Some(node)
             },
+            Action::DumpScreen {
+                file_path: None, ..
+            } => None,
             Action::DumpLayout => Some(KdlNode::new("DumpLayout")),
             Action::EditScrollback => Some(KdlNode::new("EditScrollback")),
+            Action::EditScrollbackRaw => Some(KdlNode::new("EditScrollbackRaw")),
             Action::ScrollUp => Some(KdlNode::new("ScrollUp")),
             Action::ScrollDown => Some(KdlNode::new("ScrollDown")),
             Action::ScrollToBottom => Some(KdlNode::new("ScrollToBottom")),
@@ -726,6 +737,20 @@ impl Action {
             },
             Action::TogglePaneEmbedOrFloating => Some(KdlNode::new("TogglePaneEmbedOrFloating")),
             Action::ToggleFloatingPanes => Some(KdlNode::new("ToggleFloatingPanes")),
+            Action::ShowFloatingPanes { tab_id } => {
+                let mut node = KdlNode::new("ShowFloatingPanes");
+                if let Some(id) = tab_id {
+                    node.push(KdlValue::Base10(*id as i64));
+                }
+                Some(node)
+            },
+            Action::HideFloatingPanes { tab_id } => {
+                let mut node = KdlNode::new("HideFloatingPanes");
+                if let Some(id) = tab_id {
+                    node.push(KdlValue::Base10(*id as i64));
+                }
+                Some(node)
+            },
             Action::CloseFocus => Some(KdlNode::new("CloseFocus")),
             Action::PaneNameInput { input: bytes } => {
                 let mut node = KdlNode::new("PaneNameInput");
@@ -804,6 +829,7 @@ impl Action {
                 command: run_command_action,
                 pane_name: name,
                 near_current_pane: false,
+                borderless: _,
             } => {
                 let mut node = KdlNode::new("Run");
                 let mut node_children = KdlDocument::new();
@@ -885,10 +911,10 @@ impl Action {
                     if let Some(x) = floating_pane_coordinates.x {
                         let mut x_node = KdlNode::new("x");
                         match x {
-                            SplitSize::Percent(x) => {
+                            PercentOrFixed::Percent(x) => {
                                 x_node.push(format!("{}%", x));
                             },
-                            SplitSize::Fixed(x) => {
+                            PercentOrFixed::Fixed(x) => {
                                 x_node.push(KdlValue::Base10(x as i64));
                             },
                         };
@@ -897,10 +923,10 @@ impl Action {
                     if let Some(y) = floating_pane_coordinates.y {
                         let mut y_node = KdlNode::new("y");
                         match y {
-                            SplitSize::Percent(y) => {
+                            PercentOrFixed::Percent(y) => {
                                 y_node.push(format!("{}%", y));
                             },
-                            SplitSize::Fixed(y) => {
+                            PercentOrFixed::Fixed(y) => {
                                 y_node.push(KdlValue::Base10(y as i64));
                             },
                         };
@@ -909,10 +935,10 @@ impl Action {
                     if let Some(width) = floating_pane_coordinates.width {
                         let mut width_node = KdlNode::new("width");
                         match width {
-                            SplitSize::Percent(width) => {
+                            PercentOrFixed::Percent(width) => {
                                 width_node.push(format!("{}%", width));
                             },
-                            SplitSize::Fixed(width) => {
+                            PercentOrFixed::Fixed(width) => {
                                 width_node.push(KdlValue::Base10(width as i64));
                             },
                         };
@@ -921,10 +947,10 @@ impl Action {
                     if let Some(height) = floating_pane_coordinates.height {
                         let mut height_node = KdlNode::new("height");
                         match height {
-                            SplitSize::Percent(height) => {
+                            PercentOrFixed::Percent(height) => {
                                 height_node.push(format!("{}%", height));
                             },
-                            SplitSize::Fixed(height) => {
+                            PercentOrFixed::Fixed(height) => {
                                 height_node.push(KdlValue::Base10(height as i64));
                             },
                         };
@@ -946,7 +972,7 @@ impl Action {
                 pane_name: name,
                 near_current_pane: false,
                 pane_id_to_replace: None,
-                close_replace_pane: false,
+                close_replaced_pane,
             } => {
                 let mut node = KdlNode::new("Run");
                 let mut node_children = KdlDocument::new();
@@ -973,6 +999,11 @@ impl Action {
                         hoc_node.push(KdlValue::Bool(false));
                         node_children.nodes_mut().push(hoc_node);
                     }
+                }
+                if *close_replaced_pane {
+                    let mut crp_node = KdlNode::new("close_replaced_pane");
+                    crp_node.push(KdlValue::Bool(true));
+                    node_children.nodes_mut().push(crp_node);
                 }
                 if let Some(name) = name {
                     let mut name_node = KdlNode::new("name");
@@ -1065,6 +1096,7 @@ impl Action {
                 should_float,
                 move_to_focused_tab,
                 should_open_in_place,
+                close_replaced_pane,
                 skip_cache: skip_plugin_cache,
             } => {
                 let mut node = KdlNode::new("LaunchOrFocusPlugin");
@@ -1085,6 +1117,11 @@ impl Action {
                     let mut should_open_in_place_node = KdlNode::new("in_place");
                     should_open_in_place_node.push(KdlValue::Bool(true));
                     node_children.nodes_mut().push(should_open_in_place_node);
+                }
+                if *close_replaced_pane {
+                    let mut crp_node = KdlNode::new("close_replaced_pane");
+                    crp_node.push(KdlValue::Bool(true));
+                    node_children.nodes_mut().push(crp_node);
                 }
                 if *skip_plugin_cache {
                     let mut skip_plugin_cache_node = KdlNode::new("skip_plugin_cache");
@@ -1107,6 +1144,7 @@ impl Action {
                 plugin: run_plugin_or_alias,
                 should_float,
                 should_open_in_place,
+                close_replaced_pane,
                 skip_cache: skip_plugin_cache,
                 cwd,
             } => {
@@ -1123,6 +1161,11 @@ impl Action {
                     let mut should_open_in_place_node = KdlNode::new("in_place");
                     should_open_in_place_node.push(KdlValue::Bool(true));
                     node_children.nodes_mut().push(should_open_in_place_node);
+                }
+                if *close_replaced_pane {
+                    let mut crp_node = KdlNode::new("close_replaced_pane");
+                    crp_node.push(KdlValue::Bool(true));
+                    node_children.nodes_mut().push(crp_node);
                 }
                 if *skip_plugin_cache {
                     let mut skip_plugin_cache_node = KdlNode::new("skip_plugin_cache");
@@ -1451,6 +1494,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
             "EditScrollback" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
+            "EditScrollbackRaw" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
             "ScrollUp" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
             "ScrollDown" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
             "ScrollToBottom" => {
@@ -1485,6 +1531,20 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
             },
             "ToggleFloatingPanes" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "ShowFloatingPanes" => {
+                let tab_id = action_arguments
+                    .first()
+                    .and_then(|v| v.value().as_i64())
+                    .map(|n| n as usize);
+                Ok(Action::ShowFloatingPanes { tab_id })
+            },
+            "HideFloatingPanes" => {
+                let tab_id = action_arguments
+                    .first()
+                    .and_then(|v| v.value().as_i64())
+                    .map(|n| n as usize);
+                Ok(Action::HideFloatingPanes { tab_id })
             },
             "CloseFocus" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
             "UndoRenamePane" => {
@@ -1727,13 +1787,10 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 let command_metadata = action_children.iter().next();
                 if command_metadata.is_none() {
                     return Ok(Action::OverrideLayout {
-                        tiled_layout: None,
-                        floating_layouts: vec![],
-                        swap_tiled_layouts: None,
-                        swap_floating_layouts: None,
-                        tab_name: None,
+                        tabs: vec![],
                         retain_existing_terminal_panes: false,
                         retain_existing_plugin_panes: false,
+                        apply_only_to_active_tab: false,
                     });
                 }
 
@@ -1759,6 +1816,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     .and_then(|c_m| {
                         kdl_child_bool_value_for_entry(c_m, "retain_existing_plugin_panes")
                     })
+                    .unwrap_or(false);
+                let apply_only_to_active_tab = command_metadata
+                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "apply_only_to_active_tab"))
                     .unwrap_or(false);
 
                 let layout_dir = config_options
@@ -1804,26 +1864,38 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     let (tab_name, layout, floating_panes_layout) = tabs.drain(..).next().unwrap();
                     let name = tab_name.or(name);
 
-                    Ok(Action::OverrideLayout {
-                        tiled_layout: Some(layout),
+                    let tab_layout_info = TabLayoutInfo {
+                        tab_index: 0,
+                        tab_name: name,
+                        tiled_layout: layout,
                         floating_layouts: floating_panes_layout,
                         swap_tiled_layouts,
                         swap_floating_layouts,
-                        tab_name: name,
+                    };
+
+                    Ok(Action::OverrideLayout {
+                        tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
+                        apply_only_to_active_tab,
                     })
                 } else {
                     let (layout, floating_panes_layout) = layout.new_tab();
 
-                    Ok(Action::OverrideLayout {
-                        tiled_layout: Some(layout),
+                    let tab_layout_info = TabLayoutInfo {
+                        tab_index: 0,
+                        tab_name: name,
+                        tiled_layout: layout,
                         floating_layouts: floating_panes_layout,
                         swap_tiled_layouts,
                         swap_floating_layouts,
-                        tab_name: name,
+                    };
+
+                    Ok(Action::OverrideLayout {
+                        tabs: vec![tab_layout_info],
                         retain_existing_terminal_panes,
                         retain_existing_plugin_panes,
+                        apply_only_to_active_tab,
                     })
                 }
             },
@@ -1873,6 +1945,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                 let in_place = command_metadata
                     .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "in_place"))
                     .unwrap_or(false);
+                let close_replaced_pane = command_metadata
+                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "close_replaced_pane"))
+                    .unwrap_or(false);
                 let stacked = command_metadata
                     .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "stacked"))
                     .unwrap_or(false);
@@ -1899,11 +1974,15 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     .map(|s| s.to_owned());
                 let pinned =
                     command_metadata.and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "pinned"));
+                let borderless = command_metadata
+                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "borderless"));
                 if floating {
                     Ok(Action::NewFloatingPane {
                         command: Some(run_command_action),
                         pane_name: name,
-                        coordinates: FloatingPaneCoordinates::new(x, y, width, height, pinned),
+                        coordinates: FloatingPaneCoordinates::new(
+                            x, y, width, height, pinned, borderless,
+                        ),
                         near_current_pane: false,
                     })
                 } else if in_place {
@@ -1912,7 +1991,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         pane_name: name,
                         near_current_pane: false,
                         pane_id_to_replace: None,
-                        close_replace_pane: false,
+                        close_replaced_pane,
                     })
                 } else if stacked {
                     Ok(Action::NewStackedPane {
@@ -1926,6 +2005,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         command: Some(run_command_action),
                         pane_name: name,
                         near_current_pane: false,
+                        borderless: None,
                     })
                 }
             },
@@ -1950,6 +2030,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     .unwrap_or(false);
                 let should_open_in_place = command_metadata
                     .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "in_place"))
+                    .unwrap_or(false);
+                let close_replaced_pane = command_metadata
+                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "close_replaced_pane"))
                     .unwrap_or(false);
                 let skip_plugin_cache = command_metadata
                     .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "skip_plugin_cache"))
@@ -1977,6 +2060,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     should_float,
                     move_to_focused_tab,
                     should_open_in_place,
+                    close_replaced_pane,
                     skip_cache: skip_plugin_cache,
                 })
             },
@@ -1998,6 +2082,9 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     .unwrap_or(false);
                 let should_open_in_place = command_metadata
                     .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "in_place"))
+                    .unwrap_or(false);
+                let close_replaced_pane = command_metadata
+                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "close_replaced_pane"))
                     .unwrap_or(false);
                 let skip_plugin_cache = command_metadata
                     .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "skip_plugin_cache"))
@@ -2021,6 +2108,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     plugin: run_plugin_or_alias,
                     should_float,
                     should_open_in_place,
+                    close_replaced_pane,
                     skip_cache: skip_plugin_cache,
                     cwd: None, // we explicitly do not send the current dir here so that it will be
                                // filled from the active pane == better UX
@@ -2597,6 +2685,9 @@ impl Options {
             };
         let copy_on_select =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "copy_on_select").map(|(v, _)| v);
+        let osc8_hyperlinks =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "osc8_hyperlinks")
+                .map(|(v, _)| v);
         let scrollback_editor =
             kdl_property_first_arg_as_string_or_error!(kdl_options, "scrollback_editor")
                 .map(|(string, _entry)| PathBuf::from(string));
@@ -2653,6 +2744,9 @@ impl Options {
         let advanced_mouse_actions =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "advanced_mouse_actions")
                 .map(|(v, _)| v);
+        let mouse_hover_effects =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "mouse_hover_effects")
+                .map(|(v, _)| v);
         let web_server_ip =
             match kdl_property_first_arg_as_string_or_error!(kdl_options, "web_server_ip") {
                 Some((string, entry)) => Some(IpAddr::from_str(string).map_err(|_| {
@@ -2678,6 +2772,29 @@ impl Options {
         let post_command_discovery_hook =
             kdl_property_first_arg_as_string_or_error!(kdl_options, "post_command_discovery_hook")
                 .map(|(hook, _entry)| hook.to_string());
+        let client_async_worker_tasks =
+            match kdl_property_first_arg_as_i64_or_error!(kdl_options, "client_async_worker_tasks")
+            {
+                Some((value, _)) if value >= 0 => Some(value as usize),
+                Some((value, entry)) => {
+                    return Err(kdl_parsing_error!(
+                        format!(
+                        "Number of client async worker tasks must be greater than 0, found '{}'",
+                        value
+                    ),
+                        entry
+                    ));
+                },
+                None => None,
+            };
+        let visual_bell =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "visual_bell").map(|(v, _)| v);
+        let focus_follows_mouse =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "focus_follows_mouse")
+                .map(|(v, _)| v);
+        let mouse_click_through =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "mouse_click_through")
+                .map(|(v, _)| v);
 
         Ok(Options {
             simplified_ui,
@@ -2696,6 +2813,7 @@ impl Options {
             copy_command,
             copy_clipboard,
             copy_on_select,
+            osc8_hyperlinks,
             scrollback_editor,
             session_name,
             attach_to_session,
@@ -2713,12 +2831,17 @@ impl Options {
             show_startup_tips,
             show_release_notes,
             advanced_mouse_actions,
+            mouse_hover_effects,
+            visual_bell,
+            focus_follows_mouse,
+            mouse_click_through,
             web_server_ip,
             web_server_port,
             web_server_cert,
             web_server_key,
             enforce_https_for_localhost,
             post_command_discovery_hook,
+            client_async_worker_tasks,
         })
     }
     pub fn from_string(stringified_keybindings: &String) -> Result<Self, ConfigError> {
@@ -2743,6 +2866,36 @@ impl Options {
         };
         if let Some(simplified_ui) = self.simplified_ui {
             let mut node = create_node(simplified_ui);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(true);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn osc8_hyperlinks_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            " ",
+            "// Enable OSC8 hyperlink output",
+            "// Options:",
+            "//   - true (Default)",
+            "//   - false",
+            "// ",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("osc8_hyperlinks");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(osc8_hyperlinks) = self.osc8_hyperlinks {
+            let mut node = create_node(osc8_hyperlinks);
             if add_comments {
                 node.set_leading(format!("{}\n", comment_text));
             }
@@ -3786,6 +3939,112 @@ impl Options {
             None
         }
     }
+    fn mouse_hover_effects_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}",
+            " ",
+            "// Whether to enable mouse hover visual effects (frame highlight and help text)",
+            "// default is true",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("mouse_hover_effects");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(mouse_hover_effects) = self.mouse_hover_effects {
+            let mut node = create_node(mouse_hover_effects);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn visual_bell_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}",
+            " ",
+            "// Whether to show visual bell indicators (pane/tab frame flash and [!] suffix)",
+            "// default is true",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("visual_bell");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(visual_bell) = self.visual_bell {
+            let mut node = create_node(visual_bell);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(true);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn focus_follows_mouse_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}",
+            " ", "// Whether to focus panes on mouse hover", "// default is false",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("focus_follows_mouse");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(focus_follows_mouse) = self.focus_follows_mouse {
+            let mut node = create_node(focus_follows_mouse);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
+    fn mouse_click_through_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}",
+            " ",
+            "// Whether clicking a pane to focus it also sends the click into the pane",
+            "// default is false",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("mouse_click_through");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(mouse_click_through) = self.mouse_click_through {
+            let mut node = create_node(mouse_click_through);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     fn web_server_ip_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}",
@@ -3872,10 +4131,39 @@ impl Options {
             None
         }
     }
+    fn client_async_worker_tasks_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = r#"
+// Number of async worker tasks to spawn per active client.
+//
+// Allocating few tasks may result in resource contention and lags. Small values (around 4) should
+// typically work best. Set to 0 to use the number of (physical) CPU cores.
+// Note: This only applies to web clients at the moment."#;
+        let create_node = |node_value: usize| -> KdlNode {
+            let mut node = KdlNode::new("client_async_worker_tasks");
+            node.push(KdlValue::Base10(node_value as i64));
+            node
+        };
+        if let Some(client_async_worker_tasks) = self.client_async_worker_tasks {
+            let mut node = create_node(client_async_worker_tasks);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(4usize);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     pub fn to_kdl(&self, add_comments: bool) -> Vec<KdlNode> {
         let mut nodes = vec![];
         if let Some(simplified_ui_node) = self.simplified_ui_to_kdl(add_comments) {
             nodes.push(simplified_ui_node);
+        }
+        if let Some(osc8_hyperlinks_node) = self.osc8_hyperlinks_to_kdl(add_comments) {
+            nodes.push(osc8_hyperlinks_node);
         }
         if let Some(theme_node) = self.theme_to_kdl(add_comments) {
             nodes.push(theme_node);
@@ -3988,6 +4276,18 @@ impl Options {
         if let Some(advanced_mouse_actions) = self.advanced_mouse_actions_to_kdl(add_comments) {
             nodes.push(advanced_mouse_actions);
         }
+        if let Some(mouse_hover_effects) = self.mouse_hover_effects_to_kdl(add_comments) {
+            nodes.push(mouse_hover_effects);
+        }
+        if let Some(visual_bell) = self.visual_bell_to_kdl(add_comments) {
+            nodes.push(visual_bell);
+        }
+        if let Some(focus_follows_mouse) = self.focus_follows_mouse_to_kdl(add_comments) {
+            nodes.push(focus_follows_mouse);
+        }
+        if let Some(mouse_click_through) = self.mouse_click_through_to_kdl(add_comments) {
+            nodes.push(mouse_click_through);
+        }
         if let Some(web_server_ip) = self.web_server_ip_to_kdl(add_comments) {
             nodes.push(web_server_ip);
         }
@@ -3998,6 +4298,10 @@ impl Options {
             self.post_command_discovery_hook_to_kdl(add_comments)
         {
             nodes.push(post_command_discovery_hook);
+        }
+        if let Some(client_async_worker_tasks) = self.client_async_worker_tasks_to_kdl(add_comments)
+        {
+            nodes.push(client_async_worker_tasks);
         }
         nodes
     }
@@ -5154,7 +5458,9 @@ impl SessionInfo {
                         match layout_source {
                             Some(layout_source) => match layout_source {
                                 "built-in" => Some(LayoutInfo::BuiltIn(layout_name)),
-                                "file" => Some(LayoutInfo::File(layout_name)),
+                                "file" => {
+                                    Some(LayoutInfo::File(layout_name, LayoutMetadata::default()))
+                                },
                                 _ => None,
                             },
                             None => None,
@@ -5242,6 +5548,12 @@ impl SessionInfo {
                 }
             }
         }
+        let creation_time = kdl_document
+            .get("creation_time")
+            .and_then(|n| n.entries().iter().next())
+            .and_then(|e| e.value().as_i64())
+            .map(|c| Duration::from_secs(c as u64))
+            .unwrap_or_default();
         Ok(SessionInfo {
             name,
             tabs,
@@ -5254,6 +5566,7 @@ impl SessionInfo {
             plugins: Default::default(), // we do not serialize plugin information
             tab_history,
             pane_history,
+            creation_time,
         })
     }
     pub fn to_string(&self) -> String {
@@ -5288,7 +5601,7 @@ impl SessionInfo {
         let mut available_layouts_children = KdlDocument::new();
         for layout_info in &self.available_layouts {
             let (layout_name, layout_source) = match layout_info {
-                LayoutInfo::File(name) => (name.clone(), "file"),
+                LayoutInfo::File(name, _layout_metadata) => (name.clone(), "file"),
                 LayoutInfo::BuiltIn(name) => (name.clone(), "built-in"),
                 LayoutInfo::Url(url) => (url.clone(), "url"),
                 LayoutInfo::Stringified(_stringified) => ("stringified-layout".to_owned(), "N/A"),
@@ -5356,6 +5669,11 @@ impl SessionInfo {
         kdl_document.nodes_mut().push(available_layouts);
         kdl_document.nodes_mut().push(tab_history);
         kdl_document.nodes_mut().push(pane_history);
+
+        let mut creation_time_node = KdlNode::new("creation_time");
+        creation_time_node.push(self.creation_time.as_secs() as i64);
+        kdl_document.nodes_mut().push(creation_time_node);
+
         kdl_document.fmt();
         kdl_document.to_string()
     }
@@ -5439,6 +5757,7 @@ impl TabInfo {
             optional_int_node!("selectable_tiled_panes_count", usize).unwrap_or(0);
         let selectable_floating_panes_count =
             optional_int_node!("selectable_floating_panes_count", usize).unwrap_or(0);
+        let tab_id = optional_int_node!("tab_id", usize).unwrap_or(0);
         Ok(TabInfo {
             position,
             name,
@@ -5456,6 +5775,9 @@ impl TabInfo {
             display_area_columns,
             selectable_tiled_panes_count,
             selectable_floating_panes_count,
+            tab_id,
+            has_bell_notification: false,
+            is_flashing_bell: false,
         })
     }
     pub fn encode_to_kdl(&self) -> KdlDocument {
@@ -5532,6 +5854,10 @@ impl TabInfo {
         kdl_doucment
             .nodes_mut()
             .push(selectable_floating_panes_count);
+
+        let mut tab_id = KdlNode::new("tab_id");
+        tab_id.push(self.tab_id as i64);
+        kdl_doucment.nodes_mut().push(tab_id);
 
         kdl_doucment
     }
@@ -5685,6 +6011,8 @@ impl PaneInfo {
             plugin_url,
             is_selectable,
             index_in_pane_group: Default::default(), // we don't serialize this
+            default_fg: None,
+            default_bg: None,
         };
         Ok((tab_position, pane_info))
     }
@@ -5833,6 +6161,8 @@ fn serialize_and_deserialize_session_info_with_data() {
             plugin_url: None,
             is_selectable: true,
             index_in_pane_group: Default::default(), // we don't serialize this
+            default_fg: None,
+            default_bg: None,
         },
         PaneInfo {
             id: 1,
@@ -5858,6 +6188,8 @@ fn serialize_and_deserialize_session_info_with_data() {
             plugin_url: Some("i_am_a_fake_plugin".to_owned()),
             is_selectable: true,
             index_in_pane_group: Default::default(), // we don't serialize this
+            default_fg: None,
+            default_bg: None,
         },
     ];
     let mut panes = HashMap::new();
@@ -5882,6 +6214,9 @@ fn serialize_and_deserialize_session_info_with_data() {
                 display_area_columns: 10,
                 selectable_tiled_panes_count: 10,
                 selectable_floating_panes_count: 10,
+                tab_id: 0,
+                is_flashing_bell: false,
+                has_bell_notification: false,
             },
             TabInfo {
                 position: 1,
@@ -5900,21 +6235,25 @@ fn serialize_and_deserialize_session_info_with_data() {
                 display_area_columns: 10,
                 selectable_tiled_panes_count: 10,
                 selectable_floating_panes_count: 10,
+                tab_id: 1,
+                is_flashing_bell: false,
+                has_bell_notification: false,
             },
         ],
         panes: PaneManifest { panes },
         connected_clients: 2,
         is_current_session: false,
         available_layouts: vec![
-            LayoutInfo::File("layout1".to_owned()),
+            LayoutInfo::File("layout1".to_owned(), LayoutMetadata::default()),
             LayoutInfo::BuiltIn("layout2".to_owned()),
-            LayoutInfo::File("layout3".to_owned()),
+            LayoutInfo::File("layout3".to_owned(), LayoutMetadata::default()),
         ],
         plugins: Default::default(),
         web_client_count: 2,
         web_clients_allowed: true,
         tab_history: Default::default(),
         pane_history: Default::default(),
+        creation_time: Duration::from_secs(300),
     };
     let serialized = session_info.to_string();
     let deserealized = SessionInfo::from_string(&serialized, "not this session").unwrap();
@@ -6800,4 +7139,24 @@ fn bare_config_from_default_assets_to_string_with_comments() {
         "Deserialized serialized config equals original config"
     );
     insta::assert_snapshot!(fake_config_stringified);
+}
+
+#[test]
+fn osc8_hyperlinks_config_parsing() {
+    let config_with_osc8_disabled = r#"
+        osc8_hyperlinks false
+    "#;
+    let config = Config::from_kdl(config_with_osc8_disabled, None).unwrap();
+    assert_eq!(config.options.osc8_hyperlinks, Some(false));
+
+    let config_with_osc8_enabled = r#"
+        osc8_hyperlinks true
+    "#;
+    let config = Config::from_kdl(config_with_osc8_enabled, None).unwrap();
+    assert_eq!(config.options.osc8_hyperlinks, Some(true));
+
+    // Test serialization roundtrip
+    let serialized = config.to_string(false);
+    let deserialized = Config::from_kdl(&serialized, None).unwrap();
+    assert_eq!(deserialized.options.osc8_hyperlinks, Some(true));
 }

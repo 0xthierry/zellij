@@ -155,9 +155,10 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Locked"
         }}
-        bind "q" {{
-            LaunchPlugin "zellij:sequence" {{
+        bind "l" {{
+            LaunchOrFocusPlugin "zellij:layout-manager" {{
                 floating true
+                move_to_focused_tab true
             }};
             SwitchToMode "Locked"
         }}
@@ -377,9 +378,10 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
-        bind "q" {{
-            LaunchPlugin "zellij:sequence" {{
+        bind "l" {{
+            LaunchOrFocusPlugin "zellij:layout-manager" {{
                 floating true
+                move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
@@ -599,9 +601,10 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
-        bind "q" {{
-            LaunchPlugin "zellij:sequence" {{
+        bind "l" {{
+            LaunchOrFocusPlugin "zellij:layout-manager" {{
                 floating true
+                move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
@@ -802,9 +805,10 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
-        bind "q" {{
-            LaunchPlugin "zellij:sequence" {{
+        bind "l" {{
+            LaunchOrFocusPlugin "zellij:layout-manager" {{
                 floating true
+                move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
@@ -1005,9 +1009,10 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
-        bind "q" {{
-            LaunchPlugin "zellij:sequence" {{
+        bind "l" {{
+            LaunchOrFocusPlugin "zellij:layout-manager" {{
                 floating true
+                move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}
@@ -1203,9 +1208,10 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
-        bind "q" {{
-            LaunchPlugin "zellij:sequence" {{
+        bind "l" {{
+            LaunchOrFocusPlugin "zellij:layout-manager" {{
                 floating true
+                move_to_focused_tab true
             }};
             SwitchToMode "Normal"
         }}

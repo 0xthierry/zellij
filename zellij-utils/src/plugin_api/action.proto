@@ -121,6 +121,7 @@ message FloatingPaneLayout {
   bool already_running = 9;
   optional string pane_initial_contents = 10;
   optional uint32 logical_position = 11;
+  optional bool borderless = 12;
 }
 
 message SwapTiledLayout {
@@ -143,10 +144,17 @@ message LayoutConstraintFloatingPair {
   repeated FloatingPaneLayout layouts = 2;
 }
 
+message CommandOrPluginFile {
+  string path = 1;
+  optional int32 line_number = 2;
+  optional string cwd = 3;
+}
+
 message CommandOrPlugin {
   oneof command_or_plugin_type {
     RunCommandAction command = 1;
     RunPluginOrAlias plugin = 2;
+    CommandOrPluginFile file = 3;
   }
 }
 
@@ -162,14 +170,20 @@ message NewTabPayload {
   optional UnblockCondition first_pane_unblock_condition = 9;
 }
 
+message TabLayoutInfo {
+  uint32 tab_index = 1;
+  optional string tab_name = 2;
+  TiledPaneLayout tiled_layout = 3;
+  repeated FloatingPaneLayout floating_layouts = 4;
+  repeated SwapTiledLayout swap_tiled_layouts = 5;
+  repeated SwapFloatingLayout swap_floating_layouts = 6;
+}
+
 message OverrideLayoutPayload {
-  optional TiledPaneLayout tiled_layout = 1;
-  repeated FloatingPaneLayout floating_layouts = 2;
-  repeated SwapTiledLayout swap_tiled_layouts = 3;
-  repeated SwapFloatingLayout swap_floating_layouts = 4;
-  optional string tab_name = 5;
-  bool retain_existing_terminal_panes = 10;
-  bool retain_existing_plugin_panes = 11;
+  repeated TabLayoutInfo tabs = 1;
+  bool retain_existing_terminal_panes = 2;
+  bool retain_existing_plugin_panes = 3;
+  bool apply_only_to_active_tab = 4;
 }
 
 message Action {
@@ -224,6 +238,12 @@ message Action {
     NewTabPayload new_tab_payload = 51;
     NewInPlacePanePayload new_in_place_pane_payload = 52;
     OverrideLayoutPayload override_layout_payload = 53;
+    SetPaneBorderlessPayload set_pane_borderless_payload = 54;
+    uint64 go_to_tab_by_id_payload = 55;
+    uint64 close_tab_by_id_payload = 56;
+    TabIdAndName rename_tab_by_id_payload = 57;
+    ShowFloatingPanesPayload show_floating_panes_payload = 58;
+    HideFloatingPanesPayload hide_floating_panes_payload = 59;
   }
 }
 
@@ -237,6 +257,19 @@ message CliPipePayload {
 message IdAndName {
   bytes name = 1;
   uint32 id = 2;
+}
+
+message TabIdAndName {
+  uint64 tab_id = 1;
+  string name = 2;
+}
+
+message ShowFloatingPanesPayload {
+  optional uint32 tab_id = 1;
+}
+
+message HideFloatingPanesPayload {
+  optional uint32 tab_id = 1;
 }
 
 message PaneIdAndShouldFloat {
@@ -290,6 +323,7 @@ message NewTiledPanePayload {
   optional RunCommandAction command = 1;
   optional resize.ResizeDirection direction = 2;
   bool near_current_pane = 3;
+  optional bool borderless = 4;
 }
 
 message MovePanePayload {
@@ -347,6 +381,8 @@ message WriteCharsPayload {
 message DumpScreenPayload {
   string file_path = 1;
   bool include_scrollback = 2;
+  optional PaneId pane_id = 3;
+  bool dump_to_stdout = 4;
 }
 
 enum ActionName {
@@ -441,6 +477,12 @@ enum ActionName {
     NewBlockingPane = 91;
     NewInPlacePane = 92;
     OverrideLayout = 93;
+    SetPaneBorderless = 94;
+    GoToTabById = 95;
+    CloseTabById = 96;
+    RenameTabById = 97;
+    ShowFloatingPanes = 98;
+    HideFloatingPanes = 99;
 }
 
 message Position {
@@ -471,6 +513,13 @@ message FloatingPaneCoordinates {
   optional SplitSize width = 3;
   optional SplitSize height = 4;
   optional bool pinned = 5;
+  optional bool borderless = 6;
+}
+
+// SetPaneBorderlessPayload specifies the pane and borderless state
+message SetPaneBorderlessPayload {
+  PaneId pane_id = 1;
+  bool borderless = 2;
 }
 
 // UnblockCondition specifies when a blocking pane should unblock
@@ -483,7 +532,7 @@ enum UnblockCondition {
 // NewPanePlacement specifies where a new pane should be placed
 message NewPanePlacement {
   oneof placement_variant {
-    bool no_preference = 1;
+    NoPreferenceOptions no_preference = 1;
     TiledPlacement tiled = 2;
     FloatingPlacement floating = 3;
     InPlaceConfig in_place = 4;
@@ -491,8 +540,13 @@ message NewPanePlacement {
   }
 }
 
+message NoPreferenceOptions {
+  optional bool borderless = 1;
+}
+
 message TiledPlacement {
   optional resize.ResizeDirection direction = 1;
+  optional bool borderless = 2;
 }
 
 message FloatingPlacement {
@@ -502,10 +556,12 @@ message FloatingPlacement {
 message InPlaceConfig {
   optional PaneId pane_id_to_replace = 1;
   bool close_replaced_pane = 2;
+  optional bool borderless = 3;
 }
 
 message StackedPlacement {
   optional PaneId pane_id = 1;
+  optional bool borderless = 2;
 }
 
 message MouseEventPayload {

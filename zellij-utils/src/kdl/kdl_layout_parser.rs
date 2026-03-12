@@ -106,6 +106,8 @@ impl<'a> KdlLayoutParser<'a> {
             || property_name == "expanded"
             || property_name == "exclude_from_sync"
             || property_name == "contents_file"
+            || property_name == "default_fg"
+            || property_name == "default_bg"
     }
     fn is_a_valid_floating_pane_property(&self, property_name: &str) -> bool {
         property_name == "borderless"
@@ -124,6 +126,8 @@ impl<'a> KdlLayoutParser<'a> {
             || property_name == "height"
             || property_name == "pinned"
             || property_name == "contents_file"
+            || property_name == "default_fg"
+            || property_name == "default_bg"
     }
     fn is_a_valid_tab_property(&self, property_name: &str) -> bool {
         property_name == "focus"
@@ -563,6 +567,10 @@ impl<'a> KdlLayoutParser<'a> {
                 kdl_node.span().len(),
             ));
         }
+        let default_fg = kdl_get_string_property_or_child_value_with_error!(kdl_node, "default_fg")
+            .map(|s| s.to_string());
+        let default_bg = kdl_get_string_property_or_child_value_with_error!(kdl_node, "default_bg")
+            .map(|s| s.to_string());
         self.assert_no_mixed_children_and_properties(kdl_node)?;
         let pane_initial_contents = contents_file.and_then(|contents_file| {
             self.file_name
@@ -573,7 +581,7 @@ impl<'a> KdlLayoutParser<'a> {
                 })
         });
         Ok(TiledPaneLayout {
-            borderless: borderless.unwrap_or_default(),
+            borderless,
             focus,
             name,
             split_size,
@@ -585,6 +593,8 @@ impl<'a> KdlLayoutParser<'a> {
             children_are_stacked,
             is_expanded_in_stack,
             pane_initial_contents,
+            default_fg,
+            default_bg,
             ..Default::default()
         })
     }
@@ -598,12 +608,17 @@ impl<'a> KdlLayoutParser<'a> {
         let x = self.parse_percent_or_fixed(kdl_node, "x", true)?;
         let y = self.parse_percent_or_fixed(kdl_node, "y", true)?;
         let pinned = kdl_get_bool_property_or_child_value_with_error!(kdl_node, "pinned");
+        let borderless = kdl_get_bool_property_or_child_value_with_error!(kdl_node, "borderless");
         let run = self.parse_command_plugin_or_edit_block(kdl_node)?;
         let focus = kdl_get_bool_property_or_child_value_with_error!(kdl_node, "focus");
         let name = kdl_get_string_property_or_child_value_with_error!(kdl_node, "name")
             .map(|name| name.to_string());
         let contents_file =
             kdl_get_string_property_or_child_value_with_error!(kdl_node, "contents_file");
+        let default_fg = kdl_get_string_property_or_child_value_with_error!(kdl_node, "default_fg")
+            .map(|s| s.to_string());
+        let default_bg = kdl_get_string_property_or_child_value_with_error!(kdl_node, "default_bg")
+            .map(|s| s.to_string());
         self.assert_no_mixed_children_and_properties(kdl_node)?;
         let pane_initial_contents = contents_file.and_then(|contents_file| {
             self.file_name
@@ -622,7 +637,10 @@ impl<'a> KdlLayoutParser<'a> {
             run,
             focus,
             pinned,
+            borderless,
             pane_initial_contents,
+            default_fg,
+            default_bg,
             ..Default::default()
         })
     }
@@ -747,7 +765,7 @@ impl<'a> KdlLayoutParser<'a> {
                     pane_template_run_command.add_start_suspended(start_suspended);
                 };
                 if let Some(borderless) = borderless {
-                    pane_template.borderless = borderless;
+                    pane_template.borderless = Some(borderless);
                 }
                 if let Some(focus) = focus {
                     pane_template.focus = Some(focus);
@@ -1135,7 +1153,7 @@ impl<'a> KdlLayoutParser<'a> {
                 template_name,
                 (
                     PaneOrFloatingPane::Pane(TiledPaneLayout {
-                        borderless: borderless.unwrap_or_default(),
+                        borderless,
                         focus,
                         split_size,
                         run,

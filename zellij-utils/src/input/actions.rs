@@ -3,7 +3,7 @@
 pub use super::command::{OpenFilePayload, RunCommandAction};
 use super::layout::{
     FloatingPaneLayout, Layout, PluginAlias, RunPlugin, RunPluginLocation, RunPluginOrAlias,
-    SwapFloatingLayout, SwapTiledLayout, TiledPaneLayout,
+    SwapFloatingLayout, SwapTiledLayout, TabLayoutInfo, TiledPaneLayout,
 };
 use crate::cli::CliAction;
 use crate::data::{
@@ -127,6 +127,21 @@ pub enum Action {
     WriteChars {
         chars: String,
     },
+    /// Write to a specific pane by ID.
+    WriteToPaneId {
+        bytes: Vec<u8>,
+        pane_id: PaneId,
+    },
+    /// Write Characters to a specific pane by ID.
+    WriteCharsToPaneId {
+        chars: String,
+        pane_id: PaneId,
+    },
+    /// Paste text using bracketed paste mode, optionally to a specific pane.
+    Paste {
+        chars: String,
+        pane_id: Option<PaneId>,
+    },
     /// Switch to the specified input mode.
     SwitchToMode {
         input_mode: InputMode,
@@ -159,15 +174,19 @@ pub enum Action {
     MovePaneBackwards,
     /// Clear all buffers of a current screen
     ClearScreen,
-    /// Dumps the screen to a file
+    /// Dumps the screen to a file or STDOUT
     DumpScreen {
-        file_path: String,
+        file_path: Option<String>,
         include_scrollback: bool,
+        pane_id: Option<PaneId>,
     },
     /// Dumps
     DumpLayout,
-    /// Scroll up in focus pane.
+    /// Save the current session state to disk
+    SaveSession,
     EditScrollback,
+    EditScrollbackRaw,
+    /// Scroll up in focus pane.
     ScrollUp,
     /// Scroll up at point
     ScrollUpAt {
@@ -204,6 +223,7 @@ pub enum Action {
         pane_name: Option<String>,
         start_suppressed: bool,
     },
+    /// Returns: Created pane ID (format: terminal_<id>)
     NewBlockingPane {
         placement: NewPanePlacement,
         pane_name: Option<String>,
@@ -212,16 +232,19 @@ pub enum Action {
         near_current_pane: bool,
     },
     /// Open the file in a new pane using the default editor
+    /// Returns: Created pane ID (format: terminal_<id>)
     EditFile {
         payload: OpenFilePayload,
         direction: Option<Direction>,
         floating: bool,
         in_place: bool,
+        close_replaced_pane: bool,
         start_suppressed: bool,
         coordinates: Option<FloatingPaneCoordinates>,
         near_current_pane: bool,
     },
     /// Open a new floating pane
+    /// Returns: Created pane ID (format: terminal_<id> or plugin_<id>)
     NewFloatingPane {
         command: Option<RunCommandAction>,
         pane_name: Option<String>,
@@ -229,20 +252,24 @@ pub enum Action {
         near_current_pane: bool,
     },
     /// Open a new tiled (embedded, non-floating) pane
+    /// Returns: Created pane ID (format: terminal_<id> or plugin_<id>)
     NewTiledPane {
         direction: Option<Direction>,
         command: Option<RunCommandAction>,
         pane_name: Option<String>,
         near_current_pane: bool,
+        borderless: Option<bool>,
     },
     /// Open a new pane in place of the focused one, suppressing it instead
+    /// Returns: Created pane ID (format: terminal_<id> or plugin_<id>)
     NewInPlacePane {
         command: Option<RunCommandAction>,
         pane_name: Option<String>,
         near_current_pane: bool,
         pane_id_to_replace: Option<PaneId>,
-        close_replace_pane: bool,
+        close_replaced_pane: bool,
     },
+    /// Returns: Created pane ID (format: terminal_<id> or plugin_<id>)
     NewStackedPane {
         command: Option<RunCommandAction>,
         pane_name: Option<String>,
@@ -252,6 +279,14 @@ pub enum Action {
     TogglePaneEmbedOrFloating,
     /// Toggle the visibility of all floating panes (if any) in the current Tab
     ToggleFloatingPanes,
+    /// Show all floating panes in the specified tab (or active tab if tab_id is None)
+    ShowFloatingPanes {
+        tab_id: Option<usize>,
+    },
+    /// Hide all floating panes in the specified tab (or active tab if tab_id is None)
+    HideFloatingPanes {
+        tab_id: Option<usize>,
+    },
     /// Close the focus pane.
     CloseFocus,
     PaneNameInput {
@@ -298,6 +333,12 @@ pub enum Action {
         command: RunCommandAction,
         near_current_pane: bool,
     },
+    /// Set pane default foreground/background color
+    SetPaneColor {
+        pane_id: PaneId,
+        fg: Option<String>,
+        bg: Option<String>,
+    },
     /// Detach session and exit
     Detach,
     /// Switch to a different session
@@ -308,17 +349,21 @@ pub enum Action {
         layout: Option<LayoutInfo>,
         cwd: Option<PathBuf>,
     },
+    /// Returns: Plugin pane ID (format: plugin_<id>) when creating or focusing plugin
     LaunchOrFocusPlugin {
         plugin: RunPluginOrAlias,
         should_float: bool,
         move_to_focused_tab: bool,
         should_open_in_place: bool,
+        close_replaced_pane: bool,
         skip_cache: bool,
     },
+    /// Returns: Plugin pane ID (format: plugin_<id>)
     LaunchPlugin {
         plugin: RunPluginOrAlias,
         should_float: bool,
         should_open_in_place: bool,
+        close_replaced_pane: bool,
         skip_cache: bool,
         cwd: Option<PathBuf>,
     },
@@ -351,23 +396,22 @@ pub enum Action {
     NextSwapLayout,
     /// Override the layout of the active tab
     OverrideLayout {
-        tiled_layout: Option<TiledPaneLayout>,
-        floating_layouts: Vec<FloatingPaneLayout>,
-        swap_tiled_layouts: Option<Vec<SwapTiledLayout>>,
-        swap_floating_layouts: Option<Vec<SwapFloatingLayout>>,
-        tab_name: Option<String>,
+        tabs: Vec<TabLayoutInfo>,
         retain_existing_terminal_panes: bool,
         retain_existing_plugin_panes: bool,
+        apply_only_to_active_tab: bool,
     },
     /// Query all tab names
     QueryTabNames,
     /// Open a new tiled (embedded, non-floating) plugin pane
+    /// Returns: Created pane ID (format: plugin_<id>)
     NewTiledPluginPane {
         plugin: RunPluginOrAlias,
         pane_name: Option<String>,
         skip_cache: bool,
         cwd: Option<PathBuf>,
     },
+    /// Returns: Created pane ID (format: plugin_<id>)
     NewFloatingPluginPane {
         plugin: RunPluginOrAlias,
         pane_name: Option<String>,
@@ -375,10 +419,12 @@ pub enum Action {
         cwd: Option<PathBuf>,
         coordinates: Option<FloatingPaneCoordinates>,
     },
+    /// Returns: Created pane ID (format: plugin_<id>)
     NewInPlacePluginPane {
         plugin: RunPluginOrAlias,
         pane_name: Option<String>,
         skip_cache: bool,
+        close_replaced_pane: bool,
     },
     StartOrReloadPlugin {
         plugin: RunPluginOrAlias,
@@ -410,6 +456,16 @@ pub enum Action {
     RenameTab {
         tab_index: u32,
         name: Vec<u8>,
+    },
+    GoToTabById {
+        id: u64,
+    },
+    CloseTabById {
+        id: u64,
+    },
+    RenameTabById {
+        id: u64,
+        name: String,
     },
     BreakPane,
     BreakPaneRight,
@@ -446,6 +502,25 @@ pub enum Action {
         pane_title: Option<String>,
     },
     ListClients,
+    ListPanes {
+        show_tab: bool,
+        show_command: bool,
+        show_state: bool,
+        show_geometry: bool,
+        show_all: bool,
+        output_json: bool,
+    },
+    ListTabs {
+        show_state: bool,
+        show_dimensions: bool,
+        show_panes: bool,
+        show_layout: bool,
+        show_all: bool,
+        output_json: bool,
+    },
+    CurrentTabInfo {
+        output_json: bool,
+    },
     TogglePanePinned,
     StackPanes {
         pane_ids: Vec<PaneId>,
@@ -453,6 +528,13 @@ pub enum Action {
     ChangeFloatingPaneCoordinates {
         pane_id: PaneId,
         coordinates: FloatingPaneCoordinates,
+    },
+    TogglePaneBorderless {
+        pane_id: PaneId,
+    },
+    SetPaneBorderless {
+        pane_id: PaneId,
+        borderless: bool,
     },
     TogglePaneInGroup,
     ToggleGroupMarking,
@@ -494,12 +576,121 @@ impl Action {
         config: Option<Config>,
     ) -> Result<Vec<Action>, String> {
         match cli_action {
-            CliAction::Write { bytes } => Ok(vec![Action::Write {
-                key_with_modifier: None,
-                bytes,
-                is_kitty_keyboard_protocol: false,
-            }]),
-            CliAction::WriteChars { chars } => Ok(vec![Action::WriteChars { chars }]),
+            CliAction::Write { bytes, pane_id } => match pane_id {
+                Some(pane_id_str) => {
+                    let parsed_pane_id = PaneId::from_str(&pane_id_str);
+                    match parsed_pane_id {
+                            Ok(parsed_pane_id) => {
+                                Ok(vec![Action::WriteToPaneId {
+                                    bytes,
+                                    pane_id: parsed_pane_id,
+                                }])
+                            },
+                            Err(_e) => {
+                                Err(format!(
+                                    "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                                    pane_id_str
+                                ))
+                            }
+                        }
+                },
+                None => Ok(vec![Action::Write {
+                    key_with_modifier: None,
+                    bytes,
+                    is_kitty_keyboard_protocol: false,
+                }]),
+            },
+            CliAction::WriteChars { chars, pane_id } => match pane_id {
+                Some(pane_id_str) => {
+                    let parsed_pane_id = PaneId::from_str(&pane_id_str);
+                    match parsed_pane_id {
+                            Ok(parsed_pane_id) => {
+                                Ok(vec![Action::WriteCharsToPaneId {
+                                    chars,
+                                    pane_id: parsed_pane_id,
+                                }])
+                            },
+                            Err(_e) => {
+                                Err(format!(
+                                    "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                                    pane_id_str
+                                ))
+                            }
+                        }
+                },
+                None => Ok(vec![Action::WriteChars { chars }]),
+            },
+            CliAction::Paste { chars, pane_id } => match pane_id {
+                Some(pane_id_str) => {
+                    let parsed_pane_id = PaneId::from_str(&pane_id_str);
+                    match parsed_pane_id {
+                        Ok(parsed_pane_id) => {
+                            Ok(vec![Action::Paste {
+                                chars,
+                                pane_id: Some(parsed_pane_id),
+                            }])
+                        },
+                        Err(_e) => {
+                            Err(format!(
+                                "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                                pane_id_str
+                            ))
+                        }
+                    }
+                },
+                None => Ok(vec![Action::Paste {
+                    chars,
+                    pane_id: None,
+                }]),
+            },
+            CliAction::SendKeys { keys, pane_id } => {
+                let mut actions = Vec::new();
+
+                for (index, key_str) in keys.iter().enumerate() {
+                    let key = KeyWithModifier::from_str(key_str).map_err(|e| {
+                        let suggestion = suggest_key_fix(key_str);
+                        format!(
+                            "Invalid key at position {}: \"{}\"\n  Error: {}\n{}",
+                            index + 1,
+                            key_str,
+                            e,
+                            suggestion
+                        )
+                    })?;
+
+                    #[cfg(not(target_family = "wasm"))]
+                    let bytes = key
+                        .serialize_kitty()
+                        .map(|s| s.into_bytes())
+                        .unwrap_or_else(Vec::new);
+
+                    #[cfg(target_family = "wasm")]
+                    let bytes = vec![];
+
+                    match &pane_id {
+                        Some(pane_id_str) => {
+                            let parsed_pane_id = PaneId::from_str(pane_id_str)
+                                .map_err(|_| format!(
+                                    "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                                    pane_id_str
+                                ))?;
+                            actions.push(Action::WriteToPaneId {
+                                bytes,
+                                pane_id: parsed_pane_id,
+                            });
+                        },
+                        None => {
+                            actions.push(Action::Write {
+                                key_with_modifier: Some(key),
+                                bytes,
+                                is_kitty_keyboard_protocol: true,
+                            });
+                        },
+                    }
+                }
+
+                Ok(actions)
+            },
             CliAction::Resize { resize, direction } => {
                 Ok(vec![Action::Resize { resize, direction }])
             },
@@ -513,11 +704,37 @@ impl Action {
             CliAction::MovePaneBackwards => Ok(vec![Action::MovePaneBackwards]),
             CliAction::MoveTab { direction } => Ok(vec![Action::MoveTab { direction }]),
             CliAction::Clear => Ok(vec![Action::ClearScreen]),
-            CliAction::DumpScreen { path, full } => Ok(vec![Action::DumpScreen {
-                file_path: path.as_os_str().to_string_lossy().into(),
-                include_scrollback: full,
-            }]),
+            CliAction::DumpScreen {
+                path,
+                full,
+                pane_id,
+            } => match pane_id {
+                Some(pane_id_str) => {
+                    let parsed_pane_id = PaneId::from_str(&pane_id_str);
+                    match parsed_pane_id {
+                        Ok(parsed_pane_id) => {
+                            Ok(vec![Action::DumpScreen {
+                                file_path: path.map(|p| p.as_os_str().to_string_lossy().into()),
+                                include_scrollback: full,
+                                pane_id: Some(parsed_pane_id),
+                            }])
+                        },
+                        Err(_e) => {
+                            Err(format!(
+                                "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                                pane_id_str
+                            ))
+                        }
+                    }
+                },
+                None => Ok(vec![Action::DumpScreen {
+                    file_path: path.map(|p| p.as_os_str().to_string_lossy().into()),
+                    include_scrollback: full,
+                    pane_id: None,
+                }]),
+            },
             CliAction::DumpLayout => Ok(vec![Action::DumpLayout]),
+            CliAction::SaveSession => Ok(vec![Action::SaveSession]),
             CliAction::EditScrollback => Ok(vec![Action::EditScrollback]),
             CliAction::ScrollUp => Ok(vec![Action::ScrollUp]),
             CliAction::ScrollDown => Ok(vec![Action::ScrollDown]),
@@ -537,6 +754,7 @@ impl Action {
                 cwd,
                 floating,
                 in_place,
+                close_replaced_pane,
                 name,
                 close_on_exit,
                 start_suspended,
@@ -551,6 +769,7 @@ impl Action {
                 blocking,
                 unblock_condition,
                 near_current_pane,
+                borderless,
             } => {
                 let current_dir = get_current_dir();
                 // cwd should only be specified in a plugin alias if it was explicitly given to us,
@@ -585,17 +804,24 @@ impl Action {
 
                     let placement = if floating {
                         NewPanePlacement::Floating(FloatingPaneCoordinates::new(
-                            x, y, width, height, pinned,
+                            x, y, width, height, pinned, borderless,
                         ))
                     } else if in_place {
                         NewPanePlacement::InPlace {
                             pane_id_to_replace: None,
-                            close_replaced_pane: false,
+                            close_replaced_pane,
+                            borderless,
                         }
                     } else if stacked {
-                        NewPanePlacement::Stacked(None)
+                        NewPanePlacement::Stacked {
+                            pane_id_to_stack_under: None,
+                            borderless,
+                        }
                     } else {
-                        NewPanePlacement::Tiled(direction)
+                        NewPanePlacement::Tiled {
+                            direction,
+                            borderless,
+                        }
                     };
 
                     Ok(vec![Action::NewBlockingPane {
@@ -632,13 +858,16 @@ impl Action {
                             pane_name: name,
                             skip_cache: skip_plugin_cache,
                             cwd,
-                            coordinates: FloatingPaneCoordinates::new(x, y, width, height, pinned),
+                            coordinates: FloatingPaneCoordinates::new(
+                                x, y, width, height, pinned, borderless,
+                            ),
                         }])
                     } else if in_place {
                         Ok(vec![Action::NewInPlacePluginPane {
                             plugin,
                             pane_name: name,
                             skip_cache: skip_plugin_cache,
+                            close_replaced_pane,
                         }])
                     } else {
                         // it is intentional that a new tiled plugin pane cannot include a
@@ -674,7 +903,9 @@ impl Action {
                         Ok(vec![Action::NewFloatingPane {
                             command: Some(run_command_action),
                             pane_name: name,
-                            coordinates: FloatingPaneCoordinates::new(x, y, width, height, pinned),
+                            coordinates: FloatingPaneCoordinates::new(
+                                x, y, width, height, pinned, borderless,
+                            ),
                             near_current_pane,
                         }])
                     } else if in_place {
@@ -683,7 +914,7 @@ impl Action {
                             pane_name: name,
                             near_current_pane,
                             pane_id_to_replace: None, // TODO: support this
-                            close_replace_pane: false,
+                            close_replaced_pane,
                         }])
                     } else if stacked {
                         Ok(vec![Action::NewStackedPane {
@@ -697,6 +928,7 @@ impl Action {
                             command: Some(run_command_action),
                             pane_name: name,
                             near_current_pane,
+                            borderless,
                         }])
                     }
                 } else {
@@ -704,7 +936,9 @@ impl Action {
                         Ok(vec![Action::NewFloatingPane {
                             command: None,
                             pane_name: name,
-                            coordinates: FloatingPaneCoordinates::new(x, y, width, height, pinned),
+                            coordinates: FloatingPaneCoordinates::new(
+                                x, y, width, height, pinned, borderless,
+                            ),
                             near_current_pane,
                         }])
                     } else if in_place {
@@ -713,7 +947,7 @@ impl Action {
                             pane_name: name,
                             near_current_pane,
                             pane_id_to_replace: None, // TODO: support this
-                            close_replace_pane: false,
+                            close_replaced_pane,
                         }])
                     } else if stacked {
                         Ok(vec![Action::NewStackedPane {
@@ -727,6 +961,7 @@ impl Action {
                             command: None,
                             pane_name: name,
                             near_current_pane,
+                            borderless,
                         }])
                     }
                 }
@@ -737,6 +972,7 @@ impl Action {
                 line_number,
                 floating,
                 in_place,
+                close_replaced_pane,
                 cwd,
                 x,
                 y,
@@ -744,6 +980,7 @@ impl Action {
                 height,
                 pinned,
                 near_current_pane,
+                borderless,
             } => {
                 let mut file = file;
                 let current_dir = get_current_dir();
@@ -761,14 +998,23 @@ impl Action {
                     direction,
                     floating,
                     in_place,
+                    close_replaced_pane,
                     start_suppressed,
-                    coordinates: FloatingPaneCoordinates::new(x, y, width, height, pinned),
+                    coordinates: FloatingPaneCoordinates::new(
+                        x, y, width, height, pinned, borderless,
+                    ),
                     near_current_pane,
                 }])
             },
             CliAction::SwitchMode { input_mode } => Ok(vec![Action::SwitchToMode { input_mode }]),
             CliAction::TogglePaneEmbedOrFloating => Ok(vec![Action::TogglePaneEmbedOrFloating]),
             CliAction::ToggleFloatingPanes => Ok(vec![Action::ToggleFloatingPanes]),
+            CliAction::ShowFloatingPanes { tab_id } => {
+                Ok(vec![Action::ShowFloatingPanes { tab_id }])
+            },
+            CliAction::HideFloatingPanes { tab_id } => {
+                Ok(vec![Action::HideFloatingPanes { tab_id }])
+            },
             CliAction::ClosePane => Ok(vec![Action::CloseFocus]),
             CliAction::RenamePane { name } => Ok(vec![
                 Action::UndoRenamePane,
@@ -791,6 +1037,9 @@ impl Action {
                 },
             ]),
             CliAction::UndoRenameTab => Ok(vec![Action::UndoRenameTab]),
+            CliAction::GoToTabById { id } => Ok(vec![Action::GoToTabById { id }]),
+            CliAction::CloseTabById { id } => Ok(vec![Action::CloseTabById { id }]),
+            CliAction::RenameTabById { id, name } => Ok(vec![Action::RenameTabById { id, name }]),
             CliAction::NewTab {
                 name,
                 layout,
@@ -989,6 +1238,7 @@ impl Action {
                 layout_dir,
                 retain_existing_terminal_panes,
                 retain_existing_plugin_panes,
+                apply_only_to_active_tab,
             } => {
                 // Determine layout_dir: CLI arg > config > default
                 let layout_dir = layout_dir
@@ -1041,31 +1291,41 @@ impl Action {
                     stringified_error
                 })?;
 
-                // Extract layout from first tab or use default
-                let swap_tiled_layouts = Some(layout.swap_tiled_layouts.clone());
-                let swap_floating_layouts = Some(layout.swap_floating_layouts.clone());
+                // Convert all tabs to Vec<TabLayoutInfo>
+                let tabs: Vec<TabLayoutInfo> = layout
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (tab_name, tiled, floating))| TabLayoutInfo {
+                        tab_index: index,
+                        tab_name: tab_name.clone(),
+                        tiled_layout: tiled.clone(),
+                        floating_layouts: floating.clone(),
+                        swap_tiled_layouts: Some(layout.swap_tiled_layouts.clone()),
+                        swap_floating_layouts: Some(layout.swap_floating_layouts.clone()),
+                    })
+                    .collect();
 
-                if layout.tabs.len() > 1 {
-                    return Err(format!("This layout has {} tabs, overriding only supports layouts with 0 or 1 tabs.", layout.tabs.len()));
-                }
-
-                let (name, tiled_layout, floating_panes_layout) =
-                    if let Some(first_tab) = layout.tabs.get(0).take() {
-                        first_tab.clone()
-                    } else {
-                        let name = None;
-                        let (tiled_panes, floating_panes) = layout.new_tab();
-                        (name, tiled_panes, floating_panes)
-                    };
+                // If no tabs, create default tab
+                let tabs = if tabs.is_empty() {
+                    let (tiled, floating) = layout.new_tab();
+                    vec![TabLayoutInfo {
+                        tab_index: 0,
+                        tab_name: None,
+                        tiled_layout: tiled,
+                        floating_layouts: floating,
+                        swap_tiled_layouts: Some(layout.swap_tiled_layouts),
+                        swap_floating_layouts: Some(layout.swap_floating_layouts),
+                    }]
+                } else {
+                    tabs
+                };
 
                 Ok(vec![Action::OverrideLayout {
-                    tiled_layout: Some(tiled_layout),
-                    floating_layouts: floating_panes_layout,
-                    swap_tiled_layouts,
-                    swap_floating_layouts,
-                    tab_name: name,
+                    tabs,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
+                    apply_only_to_active_tab,
                 }])
             },
             CliAction::QueryTabNames => Ok(vec![Action::QueryTabNames]),
@@ -1085,6 +1345,7 @@ impl Action {
                 url,
                 floating,
                 in_place,
+                close_replaced_pane,
                 move_to_focused_tab,
                 configuration,
                 skip_plugin_cache,
@@ -1101,6 +1362,7 @@ impl Action {
                     should_float: floating,
                     move_to_focused_tab,
                     should_open_in_place: in_place,
+                    close_replaced_pane,
                     skip_cache: skip_plugin_cache,
                 }])
             },
@@ -1108,6 +1370,7 @@ impl Action {
                 url,
                 floating,
                 in_place,
+                close_replaced_pane,
                 configuration,
                 skip_plugin_cache,
             } => {
@@ -1122,6 +1385,7 @@ impl Action {
                     plugin: run_plugin_or_alias,
                     should_float: floating,
                     should_open_in_place: in_place,
+                    close_replaced_pane,
                     skip_cache: skip_plugin_cache,
                     cwd: Some(current_dir),
                 }])
@@ -1163,6 +1427,39 @@ impl Action {
                 }])
             },
             CliAction::ListClients => Ok(vec![Action::ListClients]),
+            CliAction::ListPanes {
+                tab,
+                command,
+                state,
+                geometry,
+                all,
+                json,
+            } => Ok(vec![Action::ListPanes {
+                show_tab: tab,
+                show_command: command,
+                show_state: state,
+                show_geometry: geometry,
+                show_all: all,
+                output_json: json,
+            }]),
+            CliAction::ListTabs {
+                state,
+                dimensions,
+                panes,
+                layout,
+                all,
+                json,
+            } => Ok(vec![Action::ListTabs {
+                show_state: state,
+                show_dimensions: dimensions,
+                show_panes: panes,
+                show_layout: layout,
+                show_all: all,
+                output_json: json,
+            }]),
+            CliAction::CurrentTabInfo { json } => {
+                Ok(vec![Action::CurrentTabInfo { output_json: json }])
+            },
             CliAction::TogglePanePinned => Ok(vec![Action::TogglePanePinned]),
             CliAction::StackPanes { pane_ids } => {
                 let mut malformed_ids = vec![];
@@ -1196,8 +1493,10 @@ impl Action {
                 width,
                 height,
                 pinned,
+                borderless,
             } => {
-                let Some(coordinates) = FloatingPaneCoordinates::new(x, y, width, height, pinned)
+                let Some(coordinates) =
+                    FloatingPaneCoordinates::new(x, y, width, height, pinned, borderless)
                 else {
                     return Err(format!("Failed to parse floating pane coordinates"));
                 };
@@ -1215,6 +1514,74 @@ impl Action {
                             pane_id
                         ))
                     }
+                }
+            },
+            CliAction::TogglePaneBorderless { pane_id } => {
+                let parsed_pane_id = PaneId::from_str(&pane_id);
+                match parsed_pane_id {
+                    Ok(parsed_pane_id) => {
+                        Ok(vec![Action::TogglePaneBorderless {
+                            pane_id: parsed_pane_id,
+                        }])
+                    },
+                    Err(_e) => {
+                        Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id
+                        ))
+                    }
+                }
+            },
+            CliAction::SetPaneBorderless {
+                pane_id,
+                borderless,
+            } => {
+                let parsed_pane_id = PaneId::from_str(&pane_id);
+                match parsed_pane_id {
+                    Ok(parsed_pane_id) => {
+                        Ok(vec![Action::SetPaneBorderless {
+                            pane_id: parsed_pane_id,
+                            borderless,
+                        }])
+                    },
+                    Err(_e) => {
+                        Err(format!(
+                            "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                            pane_id
+                        ))
+                    }
+                }
+            },
+            CliAction::SetPaneColor {
+                pane_id,
+                fg,
+                bg,
+                reset,
+            } => {
+                let pane_id_str = match pane_id {
+                    Some(id) => id,
+                    None => std::env::var("ZELLIJ_PANE_ID").map_err(|_| {
+                        "No --pane-id provided and ZELLIJ_PANE_ID is not set".to_string()
+                    })?,
+                };
+                let parsed_pane_id = PaneId::from_str(&pane_id_str);
+                match parsed_pane_id {
+                    Ok(parsed_pane_id) => {
+                        let (fg, bg) = if reset {
+                            (None, None)
+                        } else {
+                            (fg, bg)
+                        };
+                        Ok(vec![Action::SetPaneColor {
+                            pane_id: parsed_pane_id,
+                            fg,
+                            bg,
+                        }])
+                    },
+                    Err(_e) => Err(format!(
+                        "Malformed pane id: {}, expecting either a bare integer (eg. 1), a terminal pane id (eg. terminal_1) or a plugin pane id (eg. plugin_1)",
+                        pane_id_str
+                    )),
                 }
             },
             CliAction::Detach => Ok(vec![Action::Detach]),
@@ -1316,11 +1683,176 @@ impl Action {
     }
 }
 
+fn suggest_key_fix(key_str: &str) -> String {
+    if key_str.contains('-') {
+        return "  Hint: Use spaces instead of hyphens (e.g., \"Ctrl a\" not \"Ctrl-a\")"
+            .to_string();
+    }
+
+    if key_str.trim().is_empty() {
+        return "  Hint: Key string cannot be empty".to_string();
+    }
+
+    let parts: Vec<&str> = key_str.split_whitespace().collect();
+    if parts.len() > 1 {
+        for part in &parts[..parts.len() - 1] {
+            let lower = part.to_ascii_lowercase();
+            if lower.starts_with("ctr") && lower != "ctrl" {
+                return format!("  Hint: Did you mean \"Ctrl\" instead of \"{}\"?", part);
+            }
+            if !matches!(lower.as_str(), "ctrl" | "alt" | "shift" | "super") {
+                return "  Hint: Valid modifiers are: Ctrl, Alt, Shift, Super".to_string();
+            }
+        }
+    }
+
+    "  Hint: Use format like \"Ctrl a\", \"Alt Shift F1\", or \"Enter\"".to_string()
+}
+
 impl From<OnForceClose> for Action {
     fn from(ofc: OnForceClose) -> Action {
         match ofc {
             OnForceClose::Quit => Action::Quit,
             OnForceClose::Detach => Action::Detach,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::BareKey;
+    use crate::data::KeyModifier;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_send_keys_single_key() {
+        let cli_action = CliAction::SendKeys {
+            keys: vec!["Enter".to_string()],
+            pane_id: None,
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::Write {
+                key_with_modifier,
+                bytes,
+                is_kitty_keyboard_protocol,
+            } => {
+                assert!(key_with_modifier.is_some());
+                let key = key_with_modifier.as_ref().unwrap();
+                assert_eq!(key.bare_key, BareKey::Enter);
+                assert!(key.key_modifiers.is_empty());
+                assert!(!bytes.is_empty());
+                assert_eq!(*is_kitty_keyboard_protocol, true);
+            },
+            _ => panic!("Expected Write action"),
+        }
+    }
+
+    #[test]
+    fn test_send_keys_with_modifier() {
+        let cli_action = CliAction::SendKeys {
+            keys: vec!["Ctrl a".to_string()],
+            pane_id: None,
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::Write {
+                key_with_modifier,
+                is_kitty_keyboard_protocol,
+                ..
+            } => {
+                assert!(key_with_modifier.is_some());
+                let key = key_with_modifier.as_ref().unwrap();
+                assert_eq!(key.bare_key, BareKey::Char('a'));
+                assert!(key.key_modifiers.contains(&KeyModifier::Ctrl));
+                assert_eq!(*is_kitty_keyboard_protocol, true);
+            },
+            _ => panic!("Expected Write action"),
+        }
+    }
+
+    #[test]
+    fn test_send_keys_multiple_keys() {
+        let cli_action = CliAction::SendKeys {
+            keys: vec!["Ctrl a".to_string(), "F1".to_string(), "Enter".to_string()],
+            pane_id: None,
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 3);
+        for action in &actions {
+            match action {
+                Action::Write {
+                    is_kitty_keyboard_protocol,
+                    ..
+                } => {
+                    assert_eq!(*is_kitty_keyboard_protocol, true);
+                },
+                _ => panic!("Expected Write action"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_send_keys_error_hyphen_syntax() {
+        let cli_action = CliAction::SendKeys {
+            keys: vec!["Ctrl-a".to_string()],
+            pane_id: None,
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Use spaces instead of hyphens"));
+    }
+
+    #[test]
+    fn test_send_keys_error_typo() {
+        let cli_action = CliAction::SendKeys {
+            keys: vec!["Ctrll a".to_string()],
+            pane_id: None,
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Ctrl") || err.contains("modifier"));
+    }
+
+    #[test]
+    fn test_send_keys_with_pane_id() {
+        let cli_action = CliAction::SendKeys {
+            keys: vec!["a".to_string()],
+            pane_id: Some("terminal_1".to_string()),
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_ok());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::WriteToPaneId { pane_id, bytes } => {
+                assert!(matches!(pane_id, PaneId::Terminal(1)));
+                assert!(!bytes.is_empty());
+            },
+            _ => panic!("Expected WriteToPaneId action"),
+        }
+    }
+
+    #[test]
+    fn test_send_keys_error_invalid_pane_id() {
+        let cli_action = CliAction::SendKeys {
+            keys: vec!["a".to_string()],
+            pane_id: Some("invalid_id".to_string()),
+        };
+        let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Malformed pane id"));
     }
 }

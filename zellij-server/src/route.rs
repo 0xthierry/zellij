@@ -18,8 +18,9 @@ use uuid::Uuid;
 use zellij_utils::{
     channels::SenderWithContext,
     data::{
-        BareKey, ConnectToSession, Direction, Event, InputMode, KeyModifier, NewPanePlacement,
-        PluginCapabilities, ResizeStrategy, UnblockCondition,
+        BareKey, ConnectToSession, Direction, Event, InputMode, KeyModifier, ListPanesResponse,
+        ListTabsResponse, NewPanePlacement, PaneListEntry, PluginCapabilities, ResizeStrategy,
+        TabInfo, UnblockCondition,
     },
     envs,
     errors::prelude::*,
@@ -28,7 +29,7 @@ use zellij_utils::{
         command::TerminalAction,
         get_mode_info,
         keybinds::Keybinds,
-        layout::{Layout, TiledPaneLayout},
+        layout::Layout,
     },
     ipc::{
         ClientAttributes, ClientToServerMsg, ExitReason, IpcReceiverWithContext, ServerToClientMsg,
@@ -43,9 +44,10 @@ const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct ActionCompletionResult {
     pub exit_status: Option<i32>,
     pub affected_pane_id: Option<PaneId>,
+    pub affected_tab_id: Option<usize>,
 }
 
-fn wait_for_action_completion(
+pub fn wait_for_action_completion(
     receiver: oneshot::Receiver<ActionCompletionResult>,
     action_name: &str,
     wait_forever: bool,
@@ -60,6 +62,7 @@ fn wait_for_action_completion(
                     ActionCompletionResult {
                         exit_status: None,
                         affected_pane_id: None,
+                        affected_tab_id: None,
                     }
                 },
             }
@@ -78,6 +81,7 @@ fn wait_for_action_completion(
                 ActionCompletionResult {
                     exit_status: None,
                     affected_pane_id: None,
+                    affected_tab_id: None,
                 }
             },
         }
@@ -96,6 +100,7 @@ pub struct NotificationEnd {
     exit_status: Option<i32>,
     unblock_condition: Option<UnblockCondition>,
     affected_pane_id: Option<PaneId>, // optional payload of the pane id affected by this action
+    affected_tab_id: Option<usize>,   // optional payload of the tab id affected by this action
 }
 
 impl Clone for NotificationEnd {
@@ -106,6 +111,7 @@ impl Clone for NotificationEnd {
             exit_status: self.exit_status,
             unblock_condition: self.unblock_condition,
             affected_pane_id: self.affected_pane_id,
+            affected_tab_id: self.affected_tab_id,
         }
     }
 }
@@ -117,6 +123,7 @@ impl NotificationEnd {
             exit_status: None,
             unblock_condition: None,
             affected_pane_id: None,
+            affected_tab_id: None,
         }
     }
 
@@ -129,6 +136,7 @@ impl NotificationEnd {
             exit_status: None,
             unblock_condition: Some(unblock_condition),
             affected_pane_id: None,
+            affected_tab_id: None,
         }
     }
 
@@ -138,6 +146,10 @@ impl NotificationEnd {
 
     pub fn set_affected_pane_id(&mut self, pane_id: PaneId) {
         self.affected_pane_id = Some(pane_id);
+    }
+
+    pub fn set_affected_tab_id(&mut self, tab_id: usize) {
+        self.affected_tab_id = Some(tab_id);
     }
 
     pub fn unblock_condition(&self) -> Option<UnblockCondition> {
@@ -151,6 +163,7 @@ impl Drop for NotificationEnd {
             let result = ActionCompletionResult {
                 exit_status: self.exit_status,
                 affected_pane_id: self.affected_pane_id,
+                affected_tab_id: self.affected_tab_id,
             };
             let _ = tx.send(result);
         }
@@ -235,6 +248,55 @@ pub(crate) fn route_action(
                     chars,
                     false,
                     client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::WriteToPaneId { bytes, pane_id } => {
+            senders
+                .send_to_screen(ScreenInstruction::ClearScroll(client_id))
+                .with_context(err_context)?;
+            senders
+                .send_to_screen(ScreenInstruction::WriteToPaneId(
+                    bytes,
+                    pane_id.into(),
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::WriteCharsToPaneId { chars, pane_id } => {
+            senders
+                .send_to_screen(ScreenInstruction::ClearScroll(client_id))
+                .with_context(err_context)?;
+            let bytes = chars.into_bytes();
+            senders
+                .send_to_screen(ScreenInstruction::WriteToPaneId(
+                    bytes,
+                    pane_id.into(),
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::Paste { chars, pane_id } => {
+            senders
+                .send_to_screen(ScreenInstruction::ClearScroll(client_id))
+                .with_context(err_context)?;
+            let bytes = chars.into_bytes();
+            senders
+                .send_to_screen(ScreenInstruction::Paste(
+                    bytes,
+                    pane_id.map(|p| p.into()),
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::SetPaneColor { pane_id, fg, bg } => {
+            senders
+                .send_to_screen(ScreenInstruction::SetPaneColor(
+                    pane_id.into(),
+                    fg,
+                    bg,
                     Some(NotificationEnd::new(completion_tx)),
                 ))
                 .with_context(err_context)?;
@@ -364,13 +426,16 @@ pub(crate) fn route_action(
         Action::DumpScreen {
             file_path,
             include_scrollback,
+            pane_id,
         } => {
             senders
                 .send_to_screen(ScreenInstruction::DumpScreen(
                     file_path,
                     client_id,
                     include_scrollback,
+                    pane_id.map(|p| p.into()),
                     Some(NotificationEnd::new(completion_tx)),
+                    cli_client_id,
                 ))
                 .with_context(err_context)?;
         },
@@ -389,9 +454,25 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::SaveSession => {
+            senders
+                .send_to_screen(ScreenInstruction::SaveSession(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
         Action::EditScrollback => {
             senders
                 .send_to_screen(ScreenInstruction::EditScrollback(
+                    client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::EditScrollbackRaw => {
+            senders
+                .send_to_screen(ScreenInstruction::EditScrollbackRaw(
                     client_id,
                     Some(NotificationEnd::new(completion_tx)),
                 ))
@@ -501,8 +582,11 @@ pub(crate) fn route_action(
         } => {
             let shell = default_shell.clone();
             let new_pane_placement = match direction {
-                Some(direction) => NewPanePlacement::Tiled(Some(direction)),
-                None => NewPanePlacement::NoPreference,
+                Some(direction) => NewPanePlacement::Tiled {
+                    direction: Some(direction),
+                    borderless: None,
+                },
+                None => NewPanePlacement::NoPreference { borderless: None },
             };
             senders
                 .send_to_pty(PtyInstruction::SpawnTerminal(
@@ -543,9 +627,10 @@ pub(crate) fn route_action(
             // behavior, they should not provide pane
             // inside the placement, but rather have the current pane id be picked up instead)
             let pane_id = match placement {
-                NewPanePlacement::Stacked(pane_id_to_stack_under) => {
-                    pane_id_to_stack_under.map(|p| p.into()).or(pane_id)
-                },
+                NewPanePlacement::Stacked {
+                    pane_id_to_stack_under,
+                    ..
+                } => pane_id_to_stack_under.map(|p| p.into()).or(pane_id),
                 NewPanePlacement::InPlace {
                     pane_id_to_replace, ..
                 } => pane_id_to_replace.map(|p| p.into()).or(pane_id),
@@ -575,6 +660,7 @@ pub(crate) fn route_action(
             direction: split_direction,
             floating: should_float,
             in_place: should_open_in_place,
+            close_replaced_pane,
             start_suppressed,
             coordinates: floating_pane_coordinates,
             near_current_pane,
@@ -586,14 +672,14 @@ pub(crate) fn route_action(
                     Some(pane_id) if near_current_pane => PtyInstruction::SpawnInPlaceTerminal(
                         Some(open_file),
                         Some(title),
-                        false,
+                        close_replaced_pane,
                         ClientTabIndexOrPaneId::PaneId(pane_id),
                         Some(NotificationEnd::new(completion_tx)),
                     ),
                     _ => PtyInstruction::SpawnInPlaceTerminal(
                         Some(open_file),
                         Some(title),
-                        false,
+                        close_replaced_pane,
                         ClientTabIndexOrPaneId::ClientId(client_id),
                         Some(NotificationEnd::new(completion_tx)),
                     ),
@@ -605,7 +691,10 @@ pub(crate) fn route_action(
                     if should_float {
                         NewPanePlacement::Floating(floating_pane_coordinates)
                     } else {
-                        NewPanePlacement::Tiled(split_direction)
+                        NewPanePlacement::Tiled {
+                            direction: split_direction,
+                            borderless: None,
+                        }
                     },
                     start_suppressed,
                     ClientTabIndexOrPaneId::ClientId(client_id),
@@ -679,7 +768,7 @@ pub(crate) fn route_action(
             pane_name: name,
             near_current_pane,
             pane_id_to_replace,
-            close_replace_pane,
+            close_replaced_pane,
         } => {
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
@@ -694,7 +783,7 @@ pub(crate) fn route_action(
                         .send_to_pty(PtyInstruction::SpawnInPlaceTerminal(
                             run_cmd,
                             name,
-                            close_replace_pane,
+                            close_replaced_pane,
                             ClientTabIndexOrPaneId::PaneId(pane_id),
                             Some(NotificationEnd::new(completion_tx)),
                         ))
@@ -705,7 +794,7 @@ pub(crate) fn route_action(
                         .send_to_pty(PtyInstruction::SpawnInPlaceTerminal(
                             run_cmd,
                             name,
-                            close_replace_pane,
+                            close_replaced_pane,
                             ClientTabIndexOrPaneId::ClientId(client_id),
                             Some(NotificationEnd::new(completion_tx)),
                         ))
@@ -728,7 +817,10 @@ pub(crate) fn route_action(
                         .send_to_pty(PtyInstruction::SpawnTerminal(
                             run_cmd,
                             name,
-                            NewPanePlacement::Stacked(Some(pane_id.into())),
+                            NewPanePlacement::Stacked {
+                                pane_id_to_stack_under: Some(pane_id.into()),
+                                borderless: None,
+                            },
                             false,
                             ClientTabIndexOrPaneId::PaneId(pane_id),
                             Some(NotificationEnd::new(completion_tx)),
@@ -741,7 +833,10 @@ pub(crate) fn route_action(
                         .send_to_pty(PtyInstruction::SpawnTerminal(
                             run_cmd,
                             name,
-                            NewPanePlacement::Stacked(None),
+                            NewPanePlacement::Stacked {
+                                pane_id_to_stack_under: None,
+                                borderless: None,
+                            },
                             false,
                             ClientTabIndexOrPaneId::ClientId(client_id),
                             Some(NotificationEnd::new(completion_tx)),
@@ -756,6 +851,7 @@ pub(crate) fn route_action(
             command: run_command,
             pane_name: name,
             near_current_pane,
+            borderless,
         } => {
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
@@ -769,7 +865,10 @@ pub(crate) fn route_action(
                 .send_to_pty(PtyInstruction::SpawnTerminal(
                     run_cmd,
                     name,
-                    NewPanePlacement::Tiled(direction),
+                    NewPanePlacement::Tiled {
+                        direction,
+                        borderless,
+                    },
                     false,
                     client_tab_index_or_paneid,
                     Some(NotificationEnd::new(completion_tx)),
@@ -825,7 +924,10 @@ pub(crate) fn route_action(
                 .send_to_pty(PtyInstruction::SpawnTerminal(
                     run_cmd,
                     None,
-                    NewPanePlacement::Tiled(command.direction),
+                    NewPanePlacement::Tiled {
+                        direction: command.direction,
+                        borderless: None,
+                    },
                     false,
                     client_tab_index_or_paneid,
                     Some(NotificationEnd::new(completion_tx)),
@@ -955,6 +1057,32 @@ pub(crate) fn route_action(
             senders
                 .send_to_screen(ScreenInstruction::UndoRenameTab(
                     client_id,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::GoToTabById { id } => {
+            senders
+                .send_to_screen(ScreenInstruction::GoToTabWithId(
+                    id as usize,
+                    Some(client_id),
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::CloseTabById { id } => {
+            senders
+                .send_to_screen(ScreenInstruction::CloseTabWithId(
+                    id as usize,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::RenameTabById { id, name } => {
+            senders
+                .send_to_screen(ScreenInstruction::RenameTabWithId(
+                    id as usize,
+                    name.into_bytes(),
                     Some(NotificationEnd::new(completion_tx)),
                 ))
                 .with_context(err_context)?;
@@ -1115,33 +1243,22 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
         Action::OverrideLayout {
-            tiled_layout,
-            floating_layouts,
-            swap_tiled_layouts,
-            swap_floating_layouts,
-            tab_name,
+            tabs,
             retain_existing_terminal_panes,
             retain_existing_plugin_panes,
+            apply_only_to_active_tab,
         } => {
-            // Extract required layout fields, use defaults if None
             let cwd = None;
             let shell = default_shell.clone();
-            let tiled = tiled_layout.unwrap_or_else(|| TiledPaneLayout::default());
-            let floating = floating_layouts;
-            let swap_tiled = swap_tiled_layouts;
-            let swap_floating = swap_floating_layouts;
 
             senders
                 .send_to_screen(ScreenInstruction::OverrideLayout(
                     cwd,
                     shell,
-                    tab_name,
-                    tiled,
-                    floating,
-                    swap_tiled,
-                    swap_floating,
+                    tabs,
                     retain_existing_terminal_panes,
                     retain_existing_plugin_panes,
+                    apply_only_to_active_tab,
                     client_id,
                     Some(NotificationEnd::new(completion_tx)),
                 ))
@@ -1195,6 +1312,7 @@ pub(crate) fn route_action(
             plugin: run_plugin,
             pane_name: name,
             skip_cache,
+            close_replaced_pane,
         } => {
             if let Some(pane_id) = pane_id {
                 senders
@@ -1203,6 +1321,7 @@ pub(crate) fn route_action(
                         name,
                         pane_id,
                         skip_cache,
+                        close_replaced_pane,
                         client_id,
                         Some(NotificationEnd::new(completion_tx)),
                     ))
@@ -1225,6 +1344,7 @@ pub(crate) fn route_action(
             should_float,
             move_to_focused_tab,
             should_open_in_place,
+            close_replaced_pane,
             skip_cache,
         } => {
             senders
@@ -1233,6 +1353,7 @@ pub(crate) fn route_action(
                     should_float,
                     move_to_focused_tab,
                     should_open_in_place,
+                    close_replaced_pane,
                     pane_id,
                     skip_cache,
                     client_id,
@@ -1244,6 +1365,7 @@ pub(crate) fn route_action(
             plugin: run_plugin,
             should_float,
             should_open_in_place,
+            close_replaced_pane,
             skip_cache,
             cwd,
         } => {
@@ -1252,6 +1374,7 @@ pub(crate) fn route_action(
                     run_plugin,
                     should_float,
                     should_open_in_place,
+                    close_replaced_pane,
                     pane_id,
                     skip_cache,
                     cwd,
@@ -1499,6 +1622,94 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::ListPanes {
+            show_tab,
+            show_command,
+            show_state,
+            show_geometry,
+            show_all,
+            output_json,
+        } => {
+            let maybe_panes =
+                request_panes_from_screen(&senders, show_all).with_context(err_context)?;
+
+            if let Some(mut pane_entries) = maybe_panes {
+                if show_command || show_all || output_json {
+                    enrich_panes_with_pty_data(&mut pane_entries, &senders)
+                        .with_context(err_context)?;
+                }
+
+                let output_lines = if output_json {
+                    format_panes_as_json(&pane_entries)
+                } else {
+                    format_panes_table(
+                        &pane_entries,
+                        show_tab || show_all,
+                        show_command || show_all,
+                        show_state || show_all,
+                        show_geometry || show_all,
+                    )
+                };
+
+                send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
+            } else {
+                send_error_to_client(cli_client_id, os_input.as_ref(), "Timeout listing panes");
+            }
+            drop(NotificationEnd::new(completion_tx));
+        },
+        Action::ListTabs {
+            show_state,
+            show_dimensions,
+            show_panes,
+            show_layout,
+            show_all,
+            output_json,
+        } => {
+            let maybe_tabs =
+                request_tabs_from_screen(&senders, client_id).with_context(err_context)?;
+
+            if let Some(tab_infos) = maybe_tabs {
+                let output_lines = if output_json {
+                    format_tabs_as_json(&tab_infos)
+                } else {
+                    format_tabs_table(
+                        &tab_infos,
+                        show_state || show_all,
+                        show_dimensions || show_all,
+                        show_panes || show_all,
+                        show_layout || show_all,
+                    )
+                };
+
+                send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
+            } else {
+                send_error_to_client(cli_client_id, os_input.as_ref(), "Timeout listing tabs");
+            }
+            drop(NotificationEnd::new(completion_tx));
+        },
+        Action::CurrentTabInfo { output_json } => {
+            let maybe_tab_info = request_current_tab_info_from_screen(&senders, client_id)
+                .with_context(err_context)?;
+
+            match maybe_tab_info {
+                Some(tab_info) => {
+                    let output_lines = if output_json {
+                        format_current_tab_info_as_json(&tab_info)
+                    } else {
+                        format_current_tab_info_plain(&tab_info)
+                    };
+                    send_output_to_client(cli_client_id, os_input.as_ref(), output_lines);
+                },
+                None => {
+                    send_error_to_client(
+                        cli_client_id,
+                        os_input.as_ref(),
+                        "No active tab found for current client",
+                    );
+                },
+            }
+            drop(NotificationEnd::new(completion_tx));
+        },
         Action::TogglePanePinned => {
             senders
                 .send_to_screen(ScreenInstruction::TogglePanePinned(
@@ -1529,6 +1740,26 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::TogglePaneBorderless { pane_id } => {
+            senders
+                .send_to_screen(ScreenInstruction::TogglePaneBorderless(
+                    pane_id.into(),
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
+        Action::SetPaneBorderless {
+            pane_id,
+            borderless,
+        } => {
+            senders
+                .send_to_screen(ScreenInstruction::SetPaneBorderless(
+                    pane_id.into(),
+                    borderless,
+                    Some(NotificationEnd::new(completion_tx)),
+                ))
+                .with_context(err_context)?;
+        },
         Action::TogglePaneInGroup => {
             senders
                 .send_to_screen(ScreenInstruction::TogglePaneInGroup(
@@ -1545,15 +1776,59 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::ShowFloatingPanes { tab_id } => {
+            senders
+                .send_to_screen(ScreenInstruction::ShowFloatingPanes {
+                    client_id,
+                    tab_id,
+                    completion: Some(NotificationEnd::new(completion_tx)),
+                })
+                .with_context(err_context)?;
+        },
+        Action::HideFloatingPanes { tab_id } => {
+            senders
+                .send_to_screen(ScreenInstruction::HideFloatingPanes {
+                    client_id,
+                    tab_id,
+                    completion: Some(NotificationEnd::new(completion_tx)),
+                })
+                .with_context(err_context)?;
+        },
     }
     let result = wait_for_action_completion(completion_rx, &action_name, wait_forever);
     if let Some(exit_status) = result.exit_status {
         if let Some(cli_client_id) = cli_client_id {
-            if let Some(os_input) = os_input {
+            if let Some(ref os_input) = os_input {
                 let _ = os_input.send_to_client(
                     cli_client_id,
                     ServerToClientMsg::Exit {
                         exit_reason: ExitReason::CustomExitStatus(exit_status),
+                    },
+                );
+            }
+        }
+    }
+    // Return tab ID to CLI clients as plain text
+    if let Some(tab_id) = result.affected_tab_id {
+        if let Some(cli_client_id) = cli_client_id {
+            if let Some(ref os_input) = os_input {
+                let _ = os_input.send_to_client(
+                    cli_client_id,
+                    ServerToClientMsg::Log {
+                        lines: vec![tab_id.to_string()],
+                    },
+                );
+            }
+        }
+    }
+    // Return pane ID to CLI clients as plain text
+    if let Some(pane_id) = result.affected_pane_id {
+        if let Some(cli_client_id) = cli_client_id {
+            if let Some(ref os_input) = os_input {
+                let _ = os_input.send_to_client(
+                    cli_client_id,
+                    ServerToClientMsg::Log {
+                        lines: vec![pane_id.to_string()],
                     },
                 );
             }
@@ -1712,7 +1987,7 @@ pub(crate) fn route_thread_main(
                                                 cli_client_id: None,
                                             });
 
-                                        if route_action(
+                                        match route_action(
                                             action,
                                             client_id,
                                             None,
@@ -1726,10 +2001,15 @@ pub(crate) fn route_thread_main(
                                             keybinds.clone(),
                                             client_input_mode,
                                             Some(os_input.clone()),
-                                        )?
-                                        .0
-                                        {
-                                            should_break = true;
+                                        ) {
+                                            Ok(route_action_should_break) => {
+                                                if route_action_should_break.0 {
+                                                    should_break = true;
+                                                }
+                                            },
+                                            Err(e) => {
+                                                log::error!("{}", e);
+                                            },
                                         }
                                     }
                                 }
@@ -1802,7 +2082,7 @@ pub(crate) fn route_thread_main(
                                 client_keybinds,
                             )) = session_data_assets
                             {
-                                if route_action(
+                                match route_action(
                                     action,
                                     client_id,
                                     Some(cli_client_id),
@@ -1816,10 +2096,15 @@ pub(crate) fn route_thread_main(
                                     client_keybinds,
                                     client_input_mode,
                                     Some(os_input.clone()),
-                                )?
-                                .0
-                                {
-                                    should_break = true;
+                                ) {
+                                    Ok(route_action_should_break) => {
+                                        if route_action_should_break.0 {
+                                            should_break = true;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        log::error!("{}", e);
+                                    },
                                 }
                             }
                         },
@@ -1840,23 +2125,26 @@ pub(crate) fn route_thread_main(
                                     .to_anyhow()
                                     .with_context(err_context)?
                                     .set_client_size(client_id, new_size);
-                                session_state
+                                // min_client_terminal_size() skips clients whose
+                                // entry is still None — i.e. new_client() was
+                                // called but set_client_data() hasn't been yet.
+                                // set_client_size() above is a no-op in that
+                                // case (it doesn't upgrade None to Some). This
+                                // can happen if a resize arrives before the
+                                // initial connection setup completes; the server
+                                // will query the terminal size once it does.
+                                if let Some(min_size) = session_state
                                     .read()
                                     .to_anyhow()
-                                    .and_then(|state| {
-                                        state.min_client_terminal_size().ok_or(anyhow!(
-                                            "failed to determine minimal client terminal size"
+                                    .with_context(err_context)?
+                                    .min_client_terminal_size()
+                                {
+                                    let _ = senders.as_ref().map(|s| {
+                                        s.send_to_screen(ScreenInstruction::TerminalResize(
+                                            min_size,
                                         ))
-                                    })
-                                    .and_then(|min_size| {
-                                        let _ = senders.as_ref().map(|s| {
-                                            s.send_to_screen(ScreenInstruction::TerminalResize(
-                                                min_size,
-                                            ))
-                                        });
-                                        Ok(())
-                                    })
-                                    .with_context(err_context)?;
+                                    });
+                                }
                             }
                         },
                         ClientToServerMsg::TerminalPixelDimensions { pixel_dimensions } => {
@@ -2018,6 +2306,21 @@ pub(crate) fn route_thread_main(
                             let _ =
                                 to_server.send(ServerInstruction::FailedToStartWebServer(error));
                         },
+                        ClientToServerMsg::SubscribeToPaneRenders {
+                            ref pane_ids,
+                            ref scrollback,
+                        } => {
+                            send_to_screen_or_retry_queue!(
+                                senders,
+                                ScreenInstruction::SubscribeToPaneRenders {
+                                    client_id,
+                                    pane_ids: pane_ids.clone(),
+                                    scrollback: *scrollback,
+                                },
+                                instruction,
+                                retry_queue
+                            );
+                        },
                     }
                     Ok(should_break)
                 };
@@ -2065,4 +2368,525 @@ pub(crate) fn route_thread_main(
     // route thread exited, make sure we clean up
     let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
     Ok(())
+}
+
+fn request_panes_from_screen(
+    senders: &ThreadSenders,
+    show_all: bool,
+) -> Result<Option<ListPanesResponse>> {
+    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use std::time::Duration;
+
+    let (response_sender, response_receiver) = unbounded();
+    senders.send_to_screen(ScreenInstruction::ListPanes {
+        show_all,
+        response_channel: response_sender,
+    })?;
+
+    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(RecvTimeoutError::Timeout) => {
+            log::error!("ListPanes timed out waiting for Screen response");
+            Ok(None)
+        },
+        Err(RecvTimeoutError::Disconnected) => {
+            log::error!("ListPanes channel disconnected");
+            Ok(None)
+        },
+    }
+}
+
+fn request_tabs_from_screen(
+    senders: &ThreadSenders,
+    client_id: ClientId,
+) -> Result<Option<ListTabsResponse>> {
+    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use std::time::Duration;
+
+    let (response_sender, response_receiver) = unbounded();
+    senders.send_to_screen(ScreenInstruction::ListTabs {
+        client_id,
+        response_channel: response_sender,
+    })?;
+
+    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(RecvTimeoutError::Timeout) => {
+            log::error!("ListTabs timed out waiting for Screen response");
+            Ok(None)
+        },
+        Err(RecvTimeoutError::Disconnected) => {
+            log::error!("ListTabs channel disconnected");
+            Ok(None)
+        },
+    }
+}
+
+fn request_current_tab_info_from_screen(
+    senders: &ThreadSenders,
+    client_id: ClientId,
+) -> Result<Option<TabInfo>> {
+    use crossbeam::channel::{unbounded, RecvTimeoutError};
+    use std::time::Duration;
+
+    let (response_sender, response_receiver) = unbounded();
+    senders.send_to_screen(ScreenInstruction::GetCurrentTabInfo {
+        client_id,
+        response_channel: response_sender,
+    })?;
+
+    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(tab_info_opt) => Ok(tab_info_opt),
+        Err(RecvTimeoutError::Timeout) => {
+            log::error!("GetCurrentTabInfo timed out waiting for Screen response");
+            Ok(None)
+        },
+        Err(RecvTimeoutError::Disconnected) => {
+            log::error!("GetCurrentTabInfo channel disconnected");
+            Ok(None)
+        },
+    }
+}
+
+fn enrich_panes_with_pty_data(
+    pane_entries: &mut [PaneListEntry],
+    senders: &ThreadSenders,
+) -> Result<()> {
+    for entry in pane_entries.iter_mut() {
+        if !entry.pane_info.is_plugin {
+            let pane_id = PaneId::Terminal(entry.pane_info.id);
+            enrich_pane_with_running_command(entry, pane_id, senders)?;
+            enrich_pane_with_cwd(entry, pane_id, senders)?;
+        }
+    }
+    Ok(())
+}
+
+fn enrich_pane_with_running_command(
+    entry: &mut PaneListEntry,
+    pane_id: PaneId,
+    senders: &ThreadSenders,
+) -> Result<()> {
+    use crossbeam::channel::unbounded;
+    use std::time::Duration;
+    use zellij_utils::data::GetPaneRunningCommandResponse;
+
+    let (cmd_sender, cmd_receiver) = unbounded();
+    senders.send_to_pty(PtyInstruction::GetPaneRunningCommand {
+        pane_id,
+        response_channel: cmd_sender,
+    })?;
+
+    if let Ok(GetPaneRunningCommandResponse::Ok(command_vec)) =
+        cmd_receiver.recv_timeout(Duration::from_millis(100))
+    {
+        entry.pane_command = Some(command_vec.join(" "));
+    }
+
+    Ok(())
+}
+
+fn enrich_pane_with_cwd(
+    entry: &mut PaneListEntry,
+    pane_id: PaneId,
+    senders: &ThreadSenders,
+) -> Result<()> {
+    use crossbeam::channel::unbounded;
+    use std::time::Duration;
+    use zellij_utils::data::GetPaneCwdResponse;
+
+    let (cwd_sender, cwd_receiver) = unbounded();
+    senders.send_to_pty(PtyInstruction::GetPaneCwd {
+        pane_id,
+        response_channel: cwd_sender,
+    })?;
+
+    if let Ok(GetPaneCwdResponse::Ok(cwd)) = cwd_receiver.recv_timeout(Duration::from_millis(100)) {
+        entry.pane_cwd = Some(cwd.to_string_lossy().to_string());
+    }
+
+    Ok(())
+}
+
+fn format_panes_as_json(pane_entries: &[PaneListEntry]) -> Vec<String> {
+    vec![serde_json::to_string_pretty(pane_entries).unwrap_or_else(|_| "[]".to_string())]
+}
+
+fn format_panes_table(
+    entries: &[PaneListEntry],
+    show_tab: bool,
+    show_command: bool,
+    show_state: bool,
+    show_geometry: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(build_table_header(
+        show_tab,
+        show_command,
+        show_state,
+        show_geometry,
+    ));
+
+    for entry in entries {
+        lines.push(build_table_row(
+            entry,
+            show_tab,
+            show_command,
+            show_state,
+            show_geometry,
+        ));
+    }
+
+    lines
+}
+
+fn build_table_header(
+    show_tab: bool,
+    show_command: bool,
+    show_state: bool,
+    show_geometry: bool,
+) -> String {
+    let mut header = Vec::new();
+
+    if show_tab {
+        header.push("TAB_ID");
+        header.push("TAB_POS");
+        header.push("TAB_NAME");
+    }
+
+    header.push("PANE_ID");
+    header.push("TYPE");
+    header.push("TITLE");
+
+    if show_command {
+        header.push("COMMAND");
+        header.push("CWD");
+    }
+
+    if show_state {
+        header.push("FOCUSED");
+        header.push("FLOATING");
+        header.push("EXITED");
+    }
+
+    if show_geometry {
+        header.push("X");
+        header.push("Y");
+        header.push("ROWS");
+        header.push("COLS");
+    }
+
+    header.join("  ")
+}
+
+fn build_table_row(
+    entry: &PaneListEntry,
+    show_tab: bool,
+    show_command: bool,
+    show_state: bool,
+    show_geometry: bool,
+) -> String {
+    let mut row = Vec::new();
+
+    if show_tab {
+        row.push(entry.tab_id.to_string());
+        row.push(entry.tab_position.to_string());
+        row.push(entry.tab_name.clone());
+    }
+
+    row.push(format_pane_id(&entry.pane_info));
+    row.push(format_pane_type(&entry.pane_info));
+    row.push(entry.pane_info.title.clone());
+
+    if show_command {
+        row.push(extract_command(entry));
+        row.push(extract_cwd(entry));
+    }
+
+    if show_state {
+        row.push(entry.pane_info.is_focused.to_string());
+        row.push(entry.pane_info.is_floating.to_string());
+        row.push(entry.pane_info.exited.to_string());
+    }
+
+    if show_geometry {
+        row.push(entry.pane_info.pane_x.to_string());
+        row.push(entry.pane_info.pane_y.to_string());
+        row.push(entry.pane_info.pane_rows.to_string());
+        row.push(entry.pane_info.pane_columns.to_string());
+    }
+
+    row.join("  ")
+}
+
+fn format_pane_id(pane_info: &zellij_utils::data::PaneInfo) -> String {
+    if pane_info.is_plugin {
+        format!("plugin_{}", pane_info.id)
+    } else {
+        format!("terminal_{}", pane_info.id)
+    }
+}
+
+fn format_pane_type(pane_info: &zellij_utils::data::PaneInfo) -> String {
+    if pane_info.is_plugin {
+        "plugin".to_string()
+    } else {
+        "terminal".to_string()
+    }
+}
+
+fn extract_command(entry: &PaneListEntry) -> String {
+    entry
+        .pane_command
+        .as_ref()
+        .or(entry.pane_info.terminal_command.as_ref())
+        .or(entry.pane_info.plugin_url.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("-")
+        .to_string()
+}
+
+fn extract_cwd(entry: &PaneListEntry) -> String {
+    entry
+        .pane_cwd
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("-")
+        .to_string()
+}
+
+fn format_tabs_as_json(tab_infos: &[TabInfo]) -> Vec<String> {
+    vec![serde_json::to_string_pretty(tab_infos).unwrap_or_else(|_| "[]".to_string())]
+}
+
+fn format_tabs_table(
+    tabs: &[TabInfo],
+    show_state: bool,
+    show_dimensions: bool,
+    show_panes: bool,
+    show_layout: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(build_tabs_table_header(
+        show_state,
+        show_dimensions,
+        show_panes,
+        show_layout,
+    ));
+
+    for tab_info in tabs {
+        lines.push(build_tabs_table_row(
+            tab_info,
+            show_state,
+            show_dimensions,
+            show_panes,
+            show_layout,
+        ));
+    }
+
+    lines
+}
+
+fn build_tabs_table_header(
+    show_state: bool,
+    show_dimensions: bool,
+    show_panes: bool,
+    show_layout: bool,
+) -> String {
+    let mut header = Vec::new();
+
+    // Core fields (always shown)
+    header.push("TAB_ID");
+    header.push("POSITION");
+    header.push("NAME");
+
+    if show_state {
+        header.push("ACTIVE");
+        header.push("FULLSCREEN");
+        header.push("SYNC_PANES");
+        header.push("FLOATING_VIS");
+    }
+
+    if show_dimensions {
+        header.push("VP_ROWS");
+        header.push("VP_COLS");
+        header.push("DA_ROWS");
+        header.push("DA_COLS");
+    }
+
+    if show_panes {
+        header.push("TILED_PANES");
+        header.push("FLOAT_PANES");
+        header.push("HIDDEN_PANES");
+    }
+
+    if show_layout {
+        header.push("SWAP_LAYOUT");
+        header.push("LAYOUT_DIRTY");
+    }
+
+    header.join("  ")
+}
+
+fn build_tabs_table_row(
+    tab_info: &TabInfo,
+    show_state: bool,
+    show_dimensions: bool,
+    show_panes: bool,
+    show_layout: bool,
+) -> String {
+    let mut row = Vec::new();
+
+    // Core fields
+    row.push(tab_info.tab_id.to_string());
+    row.push(tab_info.position.to_string());
+    row.push(tab_info.name.clone());
+
+    if show_state {
+        row.push(tab_info.active.to_string());
+        row.push(tab_info.is_fullscreen_active.to_string());
+        row.push(tab_info.is_sync_panes_active.to_string());
+        row.push(tab_info.are_floating_panes_visible.to_string());
+    }
+
+    if show_dimensions {
+        row.push(tab_info.viewport_rows.to_string());
+        row.push(tab_info.viewport_columns.to_string());
+        row.push(tab_info.display_area_rows.to_string());
+        row.push(tab_info.display_area_columns.to_string());
+    }
+
+    if show_panes {
+        row.push(tab_info.selectable_tiled_panes_count.to_string());
+        row.push(tab_info.selectable_floating_panes_count.to_string());
+        row.push(tab_info.panes_to_hide.to_string());
+    }
+
+    if show_layout {
+        row.push(
+            tab_info
+                .active_swap_layout_name
+                .as_deref()
+                .unwrap_or("-")
+                .to_string(),
+        );
+        row.push(tab_info.is_swap_layout_dirty.to_string());
+    }
+
+    row.join("  ")
+}
+
+fn format_current_tab_info_as_json(tab_info: &TabInfo) -> Vec<String> {
+    vec![serde_json::to_string_pretty(tab_info).unwrap_or_else(|_| "{}".to_string())]
+}
+
+fn format_current_tab_info_plain(tab_info: &TabInfo) -> Vec<String> {
+    vec![
+        format!("name: {}", tab_info.name),
+        format!("id: {}", tab_info.tab_id),
+        format!("position: {}", tab_info.position),
+    ]
+}
+
+fn send_error_to_client(
+    cli_client_id: Option<ClientId>,
+    os_input: Option<&Box<dyn ServerOsApi>>,
+    error_message: &str,
+) {
+    if let Some(cli_client_id) = cli_client_id {
+        if let Some(os_input) = os_input {
+            let _ = os_input.send_to_client(
+                cli_client_id,
+                ServerToClientMsg::LogError {
+                    lines: vec![error_message.to_string()],
+                },
+            );
+        }
+    }
+}
+
+fn send_output_to_client(
+    cli_client_id: Option<ClientId>,
+    os_input: Option<&Box<dyn ServerOsApi>>,
+    output_lines: Vec<String>,
+) {
+    if let Some(cli_client_id) = cli_client_id {
+        if let Some(os_input) = os_input {
+            let _ = os_input.send_to_client(
+                cli_client_id,
+                ServerToClientMsg::Log {
+                    lines: output_lines,
+                },
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_notification_end_sets_affected_tab_id() {
+        let (tx, rx) = oneshot::channel();
+        let mut notification_end = NotificationEnd::new(tx);
+
+        notification_end.set_affected_tab_id(42);
+
+        drop(notification_end);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.affected_tab_id, Some(42));
+    }
+
+    #[test]
+    fn test_notification_end_default_affected_tab_id_none() {
+        let (tx, rx) = oneshot::channel();
+        let notification_end = NotificationEnd::new(tx);
+
+        drop(notification_end);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.affected_tab_id, None);
+    }
+
+    #[test]
+    fn test_action_completion_result_includes_tab_id() {
+        let result = ActionCompletionResult {
+            exit_status: None,
+            affected_pane_id: None,
+            affected_tab_id: Some(123),
+        };
+
+        assert_eq!(result.affected_tab_id, Some(123));
+    }
+
+    #[test]
+    fn test_notification_end_with_pane_and_tab_ids() {
+        let (tx, rx) = oneshot::channel();
+        let mut notification_end = NotificationEnd::new(tx);
+
+        notification_end.set_affected_pane_id(PaneId::Terminal(10));
+        notification_end.set_affected_tab_id(5);
+
+        drop(notification_end);
+
+        let result = rx.blocking_recv().unwrap();
+        assert_eq!(result.affected_pane_id, Some(PaneId::Terminal(10)));
+        assert_eq!(result.affected_tab_id, Some(5));
+    }
+
+    #[test]
+    fn test_notification_end_clone_does_not_copy_channel() {
+        let (tx, _rx) = oneshot::channel();
+        let mut notification_end = NotificationEnd::new(tx);
+        notification_end.set_affected_tab_id(99);
+
+        let cloned = notification_end.clone();
+
+        // Verify the clone has the same data
+        assert_eq!(cloned.affected_tab_id, Some(99));
+        // But channel should be None (as per the Clone implementation comment)
+        assert!(cloned.channel.is_none());
+    }
 }

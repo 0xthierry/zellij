@@ -21,8 +21,12 @@ fn main() {
 
     {
         let config = Config::try_from(&opts).ok();
-        if let Some(Command::Sessions(Sessions::Action(cli_action))) = opts.command {
-            commands::send_action_to_session(cli_action, opts.session, config);
+        if let Some(Command::Action(cli_action)) = opts.command {
+            commands::send_action_to_session(*cli_action, opts.session, config);
+            std::process::exit(0);
+        }
+        if let Some(Command::Subscribe(subscribe_cli)) = opts.command {
+            commands::subscribe_to_session(subscribe_cli, opts.session, config);
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Run {
@@ -31,6 +35,7 @@ fn main() {
             cwd,
             floating,
             in_place,
+            close_replaced_pane,
             name,
             close_on_exit,
             start_suspended,
@@ -45,6 +50,7 @@ fn main() {
             block_until_exit_failure,
             block_until_exit,
             near_current_pane,
+            borderless,
         })) = opts.command
         {
             let cwd = cwd.or_else(|| std::env::current_dir().ok());
@@ -68,6 +74,7 @@ fn main() {
                 cwd,
                 floating,
                 in_place,
+                close_replaced_pane,
                 name,
                 close_on_exit,
                 start_suspended,
@@ -82,6 +89,7 @@ fn main() {
                 blocking,
                 unblock_condition,
                 near_current_pane,
+                borderless,
             };
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);
@@ -90,6 +98,7 @@ fn main() {
             url,
             floating,
             in_place,
+            close_replaced_pane,
             configuration,
             skip_plugin_cache,
             x,
@@ -97,6 +106,7 @@ fn main() {
             width,
             height,
             pinned,
+            borderless,
         })) = opts.command
         {
             let cwd = None;
@@ -110,6 +120,7 @@ fn main() {
                 cwd,
                 floating,
                 in_place,
+                close_replaced_pane,
                 name: None,
                 close_on_exit: false,
                 start_suspended: false,
@@ -124,6 +135,7 @@ fn main() {
                 blocking,
                 unblock_condition,
                 near_current_pane: false,
+                borderless,
             };
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);
@@ -134,6 +146,7 @@ fn main() {
             line_number,
             floating,
             in_place,
+            close_replaced_pane,
             cwd,
             x,
             y,
@@ -141,6 +154,7 @@ fn main() {
             height,
             pinned,
             near_current_pane,
+            borderless,
         })) = opts.command
         {
             let mut file = file;
@@ -156,6 +170,7 @@ fn main() {
                 line_number,
                 floating,
                 in_place,
+                close_replaced_pane,
                 cwd,
                 x,
                 y,
@@ -163,6 +178,7 @@ fn main() {
                 height,
                 pinned,
                 near_current_pane,
+                borderless,
             };
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);
@@ -275,6 +291,7 @@ fn main() {
                 web_opts.port,
                 web_opts.cert.clone(),
                 web_opts.key.clone(),
+                web_opts.server_startup_timeout,
             );
         } else if web_opts.stop {
             match commands::stop_web_server() {
@@ -287,10 +304,16 @@ fn main() {
                 },
             }
         } else if web_opts.status {
-            let config_options = commands::get_config_options_from_cli_args(&opts)
+            let mut config_options = commands::get_config_options_from_cli_args(&opts)
                 .expect("Can't find config options");
+            if let Some(ip) = web_opts.ip {
+                config_options.web_server_ip = Some(ip);
+            }
+            if let Some(port) = web_opts.port {
+                config_options.web_server_port = Some(port);
+            }
             let web_server_base_url = web_server_base_url_from_config(config_options);
-            match commands::web_server_status(&web_server_base_url) {
+            match commands::web_server_status(&web_server_base_url, web_opts.timeout) {
                 Ok(version) => {
                     let version = version.trim();
                     println!(

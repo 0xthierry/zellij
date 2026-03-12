@@ -183,6 +183,8 @@ pub struct FloatingPaneLayout {
     pub pane_initial_contents: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(uint32, optional, tag="11")]
     pub logical_position: ::core::option::Option<u32>,
+    #[prost(bool, optional, tag="12")]
+    pub borderless: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -218,8 +220,18 @@ pub struct LayoutConstraintFloatingPair {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CommandOrPluginFile {
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(int32, optional, tag="2")]
+    pub line_number: ::core::option::Option<i32>,
+    #[prost(string, optional, tag="3")]
+    pub cwd: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CommandOrPlugin {
-    #[prost(oneof="command_or_plugin::CommandOrPluginType", tags="1, 2")]
+    #[prost(oneof="command_or_plugin::CommandOrPluginType", tags="1, 2, 3")]
     pub command_or_plugin_type: ::core::option::Option<command_or_plugin::CommandOrPluginType>,
 }
 /// Nested message and enum types in `CommandOrPlugin`.
@@ -231,6 +243,8 @@ pub mod command_or_plugin {
         Command(super::RunCommandAction),
         #[prost(message, tag="2")]
         Plugin(super::RunPluginOrAlias),
+        #[prost(message, tag="3")]
+        File(super::CommandOrPluginFile),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -257,28 +271,38 @@ pub struct NewTabPayload {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct OverrideLayoutPayload {
-    #[prost(message, optional, tag="1")]
-    pub tiled_layout: ::core::option::Option<TiledPaneLayout>,
-    #[prost(message, repeated, tag="2")]
-    pub floating_layouts: ::prost::alloc::vec::Vec<FloatingPaneLayout>,
-    #[prost(message, repeated, tag="3")]
-    pub swap_tiled_layouts: ::prost::alloc::vec::Vec<SwapTiledLayout>,
-    #[prost(message, repeated, tag="4")]
-    pub swap_floating_layouts: ::prost::alloc::vec::Vec<SwapFloatingLayout>,
-    #[prost(string, optional, tag="5")]
+pub struct TabLayoutInfo {
+    #[prost(uint32, tag="1")]
+    pub tab_index: u32,
+    #[prost(string, optional, tag="2")]
     pub tab_name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(bool, tag="10")]
+    #[prost(message, optional, tag="3")]
+    pub tiled_layout: ::core::option::Option<TiledPaneLayout>,
+    #[prost(message, repeated, tag="4")]
+    pub floating_layouts: ::prost::alloc::vec::Vec<FloatingPaneLayout>,
+    #[prost(message, repeated, tag="5")]
+    pub swap_tiled_layouts: ::prost::alloc::vec::Vec<SwapTiledLayout>,
+    #[prost(message, repeated, tag="6")]
+    pub swap_floating_layouts: ::prost::alloc::vec::Vec<SwapFloatingLayout>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OverrideLayoutPayload {
+    #[prost(message, repeated, tag="1")]
+    pub tabs: ::prost::alloc::vec::Vec<TabLayoutInfo>,
+    #[prost(bool, tag="2")]
     pub retain_existing_terminal_panes: bool,
-    #[prost(bool, tag="11")]
+    #[prost(bool, tag="3")]
     pub retain_existing_plugin_panes: bool,
+    #[prost(bool, tag="4")]
+    pub apply_only_to_active_tab: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Action {
     #[prost(enumeration="ActionName", tag="1")]
     pub name: i32,
-    #[prost(oneof="action::OptionalPayload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53")]
+    #[prost(oneof="action::OptionalPayload", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59")]
     pub optional_payload: ::core::option::Option<action::OptionalPayload>,
 }
 /// Nested message and enum types in `Action`.
@@ -384,6 +408,18 @@ pub mod action {
         NewInPlacePanePayload(super::NewInPlacePanePayload),
         #[prost(message, tag="53")]
         OverrideLayoutPayload(super::OverrideLayoutPayload),
+        #[prost(message, tag="54")]
+        SetPaneBorderlessPayload(super::SetPaneBorderlessPayload),
+        #[prost(uint64, tag="55")]
+        GoToTabByIdPayload(u64),
+        #[prost(uint64, tag="56")]
+        CloseTabByIdPayload(u64),
+        #[prost(message, tag="57")]
+        RenameTabByIdPayload(super::TabIdAndName),
+        #[prost(message, tag="58")]
+        ShowFloatingPanesPayload(super::ShowFloatingPanesPayload),
+        #[prost(message, tag="59")]
+        HideFloatingPanesPayload(super::HideFloatingPanesPayload),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -405,6 +441,26 @@ pub struct IdAndName {
     pub name: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag="2")]
     pub id: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabIdAndName {
+    #[prost(uint64, tag="1")]
+    pub tab_id: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ShowFloatingPanesPayload {
+    #[prost(uint32, optional, tag="1")]
+    pub tab_id: ::core::option::Option<u32>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HideFloatingPanesPayload {
+    #[prost(uint32, optional, tag="1")]
+    pub tab_id: ::core::option::Option<u32>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -467,6 +523,8 @@ pub struct NewTiledPanePayload {
     pub direction: ::core::option::Option<i32>,
     #[prost(bool, tag="3")]
     pub near_current_pane: bool,
+    #[prost(bool, optional, tag="4")]
+    pub borderless: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -561,6 +619,10 @@ pub struct DumpScreenPayload {
     pub file_path: ::prost::alloc::string::String,
     #[prost(bool, tag="2")]
     pub include_scrollback: bool,
+    #[prost(message, optional, tag="3")]
+    pub pane_id: ::core::option::Option<PaneId>,
+    #[prost(bool, tag="4")]
+    pub dump_to_stdout: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -622,6 +684,17 @@ pub struct FloatingPaneCoordinates {
     pub height: ::core::option::Option<SplitSize>,
     #[prost(bool, optional, tag="5")]
     pub pinned: ::core::option::Option<bool>,
+    #[prost(bool, optional, tag="6")]
+    pub borderless: ::core::option::Option<bool>,
+}
+/// SetPaneBorderlessPayload specifies the pane and borderless state
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetPaneBorderlessPayload {
+    #[prost(message, optional, tag="1")]
+    pub pane_id: ::core::option::Option<PaneId>,
+    #[prost(bool, tag="2")]
+    pub borderless: bool,
 }
 /// NewPanePlacement specifies where a new pane should be placed
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -635,8 +708,8 @@ pub mod new_pane_placement {
     #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum PlacementVariant {
-        #[prost(bool, tag="1")]
-        NoPreference(bool),
+        #[prost(message, tag="1")]
+        NoPreference(super::NoPreferenceOptions),
         #[prost(message, tag="2")]
         Tiled(super::TiledPlacement),
         #[prost(message, tag="3")]
@@ -649,9 +722,17 @@ pub mod new_pane_placement {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NoPreferenceOptions {
+    #[prost(bool, optional, tag="1")]
+    pub borderless: ::core::option::Option<bool>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TiledPlacement {
     #[prost(enumeration="super::resize::ResizeDirection", optional, tag="1")]
     pub direction: ::core::option::Option<i32>,
+    #[prost(bool, optional, tag="2")]
+    pub borderless: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -666,12 +747,16 @@ pub struct InPlaceConfig {
     pub pane_id_to_replace: ::core::option::Option<PaneId>,
     #[prost(bool, tag="2")]
     pub close_replaced_pane: bool,
+    #[prost(bool, optional, tag="3")]
+    pub borderless: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StackedPlacement {
     #[prost(message, optional, tag="1")]
     pub pane_id: ::core::option::Option<PaneId>,
+    #[prost(bool, optional, tag="2")]
+    pub borderless: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1015,6 +1100,12 @@ pub enum ActionName {
     NewBlockingPane = 91,
     NewInPlacePane = 92,
     OverrideLayout = 93,
+    SetPaneBorderless = 94,
+    GoToTabById = 95,
+    CloseTabById = 96,
+    RenameTabById = 97,
+    ShowFloatingPanes = 98,
+    HideFloatingPanes = 99,
 }
 impl ActionName {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1114,6 +1205,12 @@ impl ActionName {
             ActionName::NewBlockingPane => "NewBlockingPane",
             ActionName::NewInPlacePane => "NewInPlacePane",
             ActionName::OverrideLayout => "OverrideLayout",
+            ActionName::SetPaneBorderless => "SetPaneBorderless",
+            ActionName::GoToTabById => "GoToTabById",
+            ActionName::CloseTabById => "CloseTabById",
+            ActionName::RenameTabById => "RenameTabById",
+            ActionName::ShowFloatingPanes => "ShowFloatingPanes",
+            ActionName::HideFloatingPanes => "HideFloatingPanes",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1210,6 +1307,12 @@ impl ActionName {
             "NewBlockingPane" => Some(Self::NewBlockingPane),
             "NewInPlacePane" => Some(Self::NewInPlacePane),
             "OverrideLayout" => Some(Self::OverrideLayout),
+            "SetPaneBorderless" => Some(Self::SetPaneBorderless),
+            "GoToTabById" => Some(Self::GoToTabById),
+            "CloseTabById" => Some(Self::CloseTabById),
+            "RenameTabById" => Some(Self::RenameTabById),
+            "ShowFloatingPanes" => Some(Self::ShowFloatingPanes),
+            "HideFloatingPanes" => Some(Self::HideFloatingPanes),
             _ => None,
         }
     }
